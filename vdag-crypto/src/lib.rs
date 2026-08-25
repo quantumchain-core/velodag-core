@@ -2,7 +2,7 @@ use pqcrypto_dilithium::dilithium2::{
     detached_sign, verify_detached_signature, generate_keypair, 
     PublicKey, SecretKey, DetachedSignature
 };
-use pqcrypto_traits::sign::{PublicKey as trait_PK, SecretKey as trait_SK};
+use pqcrypto_traits::sign::{PublicKey as TraitPK, SecretKey as TraitSK};
 use sha3::{Digest, Sha3_256};
 
 pub struct VeloKeyPair {
@@ -33,7 +33,7 @@ impl VeloKeyPair {
     }
 }
 
-/// Cryptographically signs a message payload using the private key
+/// Cryptographically signs a transaction or message payload using the private key
 pub fn sign_message(message: &[u8], sk: &SecretKey) -> Vec<u8> {
     let sig = detached_sign(message, sk);
     sig.as_bytes().to_vec()
@@ -52,7 +52,8 @@ pub fn verify_signature(message: &[u8], signature_bytes: &[u8], pk: &PublicKey) 
 mod tests {
     use super::*;
 
-    @test
+    // FIXED: Changed '@test' to standard Rust macro formatting '#[test]'
+    #[test]
     fn test_quantum_crypto_flow() {
         let keys = VeloKeyPair::generate();
         let address = VeloKeyPair::derive_address(&keys.public_key);
