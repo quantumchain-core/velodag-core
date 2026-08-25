@@ -8,8 +8,8 @@ use tokio::time::interval;
 
 use libp2p::{
     futures::StreamExt,
-    gossipsub::{IdentTopic, MessageAuthenticity, ConfigBuilder},
-    identity, noise, tcp, yamux, SwarmBuilder, // SwarmBuilder imported correctly from root here
+    gossipsub::{IdentTopic, MessageAuthenticity, ConfigBuilder, Behaviour as GossipsubBehaviour},
+    identity, noise, tcp, yamux, SwarmBuilder,
 };
 
 use vdag_consensus::{
@@ -38,13 +38,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let local_peer_id = libp2p::PeerId::from(local_key.public());
     println!("🆔 Local P2P Node Peer ID: {}", local_peer_id);
 
-    // Build the underlying encrypted TCP network transport stream layer matching libp2p v0.53 layout rules
+    // Provide explicit type signature annotations to clear up E0283
     let mut swarm = SwarmBuilder::with_existing_identity(local_key)
         .with_tokio()
         .with_tcp(tcp::Config::default(), noise::Config::new, yamux::Config::default)?
         .with_behaviour(|key| {
             let gossipsub_config = ConfigBuilder::default().build().unwrap();
-            libp2p::gossipsub::Behaviour::new(MessageAuthenticity::Signed(key.clone()), gossipsub_config).unwrap()
+            GossipsubBehaviour::new(MessageAuthenticity::Signed(key.clone()), gossipsub_config).unwrap()
         })?
         .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
         .build();
@@ -99,7 +99,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 5. Unified Async Block Production & P2P Stream Selection Loop
     loop {
         tokio::select! {
-            // Channel A: Run block production ticking every second
             _ = block_timer.tick() => {
                 block_height += 1;
                 println!("--------------------------------------------------");
@@ -129,7 +128,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             block_height, encode_hex(&block_hash[0..8]), next_block.header.nonce
                         );
 
-                        // Broadcast our new block automatically to all connected network nodes
                         if let Ok(encoded_payload) = bincode::serialize(&next_block) {
                             let _ = swarm.behaviour_mut().publish(block_topic.clone(), encoded_payload);
                         }
@@ -140,7 +138,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             
-            // Channel B: Continuously pump background network events from peer nodes
             network_event = swarm.select_next_some() => {
                 let _ = network::handle_p2p_events(network_event, &storage_engine, &mut ghostdag);
             }
