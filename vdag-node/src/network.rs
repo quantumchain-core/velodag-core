@@ -7,7 +7,7 @@ use vdag_consensus::{VeloBlock, BlockchainStorage, ghostdag::GhostdagManager};
 
 /// NETWORK TOPOLOGY GATES: Handles all asynchronous incoming network packets from remote peers
 pub fn handle_p2p_events(
-    event: SwarmEvent<libp2p::gossipsub::BehaviourEvent>,
+    event: SwarmEvent<Event>,
     storage_engine: &BlockchainStorage,
     ghostdag: &mut GhostdagManager,
 ) -> Result<(), Box<dyn Error>> {
@@ -37,9 +37,12 @@ fn process_incoming_packet(
             let incoming_hash = incoming_block.calculate_hash();
 
             if storage.load_block(&incoming_hash)?.is_none() {
+                // Convert raw array bytes safely to hex string to satisfy the LowerHex trait boundary
+                let hex_hash = incoming_hash.iter().map(|b| format!("{:02x}", b)).collect::<String>();
+                
                 println!(
-                    "📥 [Network Influx] Received New Block from Peer! Height: {}, Hash: 0x{:02x}{:02x}...",
-                    incoming_block.header.height, incoming_hash, incoming_hash
+                    "📥 [Network Influx] Received New Block from Peer! Height: {}, Hash: 0x{}",
+                    incoming_block.header.height, &hex_hash[0..16]
                 );
 
                 let dag_data = ghostdag.calculate_ghostdag_data(&incoming_block, incoming_hash);
