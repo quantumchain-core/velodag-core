@@ -1,13 +1,15 @@
 use libp2p::{
-    gossipsub, mdns, noise, tcp, yamux, Swarm, SwarmBuilder, PeerId, Multiaddr
+    gossipsub, mdns, noise, tcp, yamux, SwarmBuilder, PeerId
 };
 use libp2p::swarm::SwarmEvent;
 use futures::StreamExt;
 use std::error::Error;
 use std::time::Duration;
 
-// Construct a custom structural behavior combining peer discovery (mDNS) and messaging (Gossipsub)
+// Construct a custom behavior combining peer discovery (mDNS) and messaging (Gossipsub)
+// The macro attribute explicitly names the generated event enum to prevent compiler scope mismatch
 #[derive(libp2p::swarm::NetworkBehaviour)]
+#[behaviour(to_swarm = "VeloNetworkBehaviourEvent")]
 pub struct VeloNetworkBehaviour {
     pub gossipsub: gossipsub::Behaviour,
     pub mdns: mdns::tokio::Behaviour,
@@ -76,13 +78,12 @@ pub async fn start_p2p_engine() -> Result<(), Box<dyn Error>> {
                 SwarmEvent::Behaviour(VeloNetworkBehaviourEvent::Gossipsub(gossipsub::Event::Message {
                     propagation_source,
                     message_id,
-                    message,
+                    ..
                 })) => {
                     println!(
                         "[📥 P2P Message] Received broadcast data hash: {} from peer: {}",
                         message_id, propagation_source
                     );
-                    // This is where incoming block bytes will be forwarded directly into vdag-consensus
                 }
                 _ => {}
             }
