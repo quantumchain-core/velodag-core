@@ -11,16 +11,51 @@ async fn main() {
     println!("🚀 Initializing VeloDAG Core Node [Ticker: VDAG] ");
     println!("==================================================");
 
-    let miner_keys = VeloKeyPair::generate();
-    let miner_address = VeloKeyPair::derive_address(&miner_keys.public_key);
-    println!("[🔒 Crypto Engine] Local Miner Address Derived: 0x{}", hex::encode(&miner_address[0..6]));
-
-    // --- PHASE 4 INITIALIZATION: Open Persistent Database Storage ---
+    // 1. Initialize persistent storage engine
     println!("[💾 Storage Engine] Initializing database ledger on disk...");
     let storage_engine = BlockchainStorage::open();
 
+    // 2. GENESIS HARDCODING: Check if the network has a starting block
+    let genesis_hash = [0u8; 32]; // Our protocol marker for the root of the DAG
+    
+    match storage_engine.load_block(&genesis_hash) {
+        Ok(None) => {
+            println!("[🧱 Genesis Engine] Empty ledger detected! Minting Genesis Block 0...");
+            
+            let genesis_header = BlockHeader {
+                timestamp: 1782384000, // Hardcoded launch timestamp epoch
+                parents: vec![],       // Genesis block has no parents
+                tx_merkle_root: [0u8; 32],
+                nonce: 88888,          // Custom protocol genesis nonce marker
+                height: 0,
+            };
+
+            let genesis_block = VeloBlock {
+                header: genesis_header,
+                transactions: vec![],
+                coinbase_miner_output: 0,
+                coinbase_dev_output: 0,
+            };
+
+            // Save the immutable genesis block directly into the sled database database
+            storage_engine.save_block(&genesis_hash, &genesis_block).unwrap();
+            println!("[🧱 Genesis Engine] VeloDAG Genesis Block successfully committed to disk!");
+        }
+        Ok(Some(_)) => {
+            println!("[💾 Storage Engine] Genesis block verification confirmed. Resuming ledger context.");
+        }
+        Err(e) => {
+            eprintln!("[💾 Storage Engine Error] Failed to read database initialization context: {}", e);
+        }
+    }
+
+    // 3. Generate keypairs for the local node runner instances
+    let miner_keys = VeloKeyPair::generate();
+    let miner_address = VeloKeyPair::derive_address(&miner_keys.public_key);
+    println!("[🔒 Crypto Engine] Local Miner Address Live: 0x{}", hex::encode(&miner_address[0..6]));
+
     let mut node_mempool = Mempool::new();
-    let mut current_tips: Vec<[u8; 32]> = vec![[0u8; 32]];
+    let mut current_tips: Vec<[u8; 32]> = vec![genesis_hash]; // Start mining right on top of our Genesis block!
     let mut block_height = 0;
 
     let mut block_timer = interval(Duration::from_secs(1));
@@ -79,7 +114,6 @@ async fn main() {
         if next_block.verify_coinbase_rewards() {
             let block_hash = next_block.calculate_hash();
             
-            // --- PHASE 4 STORAGE EXECUTION: Save Block To Disk permanently ---
             match storage_engine.save_block(&block_hash, &next_block) {
                 Ok(_) => {
                     println!(
