@@ -1,0 +1,13 @@
+[package]
+name = "vdag-node"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Link our internal workspace modules
+vdag-crypto = { path = "../vdag-crypto" }
+vdag-consensus = { path = "../vdag-consensus" }
+
+# Asynchronous runtime engine
+tokio = { version = "1.38", features = ["full"] }
+sha3 = "0.10.8"
