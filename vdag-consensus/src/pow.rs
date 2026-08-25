@@ -35,29 +35,39 @@ impl PowManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::BlockHeader;
 
     #[test]
     fn test_mine_and_verify_block() {
         // Setup an intentionally easy target for rapid testing (high byte values)
-        let easy_target = [0x0F; 32]; 
+        let mut easy_target = [0xff; 32]; 
+        easy_target[0] = 0x0f; // Limit the first byte to enforce a small difficulty challenge
+        
         let pow_manager = PowManager::new(easy_target);
 
-        let mut block = Block {
-            hash: [0u8; 32],
-            parents: vec![[0u8; 32]],
-            timestamp: 1626000000,
-            nonce: 0,
+        // Instantiate using your proper VeloBlock data layout matching lib.rs
+        let mut block = VeloBlock {
+            header: BlockHeader {
+                timestamp: 1626000000,
+                parents: vec![[0u8; 32]],
+                tx_merkle_root: [0u8; 32],
+                nonce: 0,
+                height: 1,
+            },
+            transactions: vec![],
+            coinbase_miner_output: 83238,
+            coinbase_dev_output: 0,
         };
 
         // Mine the block
         let computed_hash = pow_manager.mine_block(&mut block);
         
-        // Assert that the nonce was modified and the hash meets the target criteria
-        assert!(block.nonce > 0);
+        // Assert that the nonce was modified and the hash meets target criteria
+        assert!(block.header.nonce > 0);
         assert!(computed_hash <= easy_target);
 
-        // Verify that another node can validate it instantly without re-mining
-        let is_valid = pow_manager.verify_pow(&block, &computed_hash);
+        // Verify using the correct single-argument signature matching the implementation
+        let is_valid = pow_manager.verify_pow(&block);
         assert!(is_valid);
     }
 }
