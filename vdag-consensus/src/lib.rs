@@ -125,4 +125,33 @@ impl Mempool {
         batch
     }
 }
+pub struct BlockchainStorage {
+    db: sled::Db,
+}
+
+impl BlockchainStorage {
+    /// Opens or initializes a local database folder named "velodag_ledger_data" on disk
+    pub fn open() -> Self {
+        let db = sled::open("velodag_ledger_data").expect("Failed to initialize storage database context");
+        BlockchainStorage { db }
+    }
+
+    /// Serializes a VeloBlock into raw binary bytes and writes it permanently to disk using its block hash as the key
+    pub fn save_block(&self, block_hash: &[u8; 32], block: &VeloBlock) -> Result<(), Box<dyn std::error::Error>> {
+        let serialized_bytes = bincode::serialize(block)?;
+        self.db.insert(block_hash, serialized_bytes)?;
+        self.db.flush()?; // Force disk sync instantly to prevent database corruption
+        Ok(())
+    }
+
+    /// Reads database bytes from disk using a block hash key and deserializes it back into a valid VeloBlock object structure
+    pub fn load_block(&self, block_hash: &[u8; 32]) -> Result<Option<VeloBlock>, Box<dyn std::error::Error>> {
+        if let Some(bytes) = self.db.get(block_hash)? {
+            let block: VeloBlock = bincode::deserialize(&bytes)?;
+            Ok(Some(block))
+        } else {
+            Ok(None)
+        }
+    }
+}
 
