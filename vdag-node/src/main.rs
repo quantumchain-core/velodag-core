@@ -1,3 +1,4 @@
+pub mod network;
 // vdag-node/src/main.rs
 
 use std::env;
