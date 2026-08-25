@@ -1,8 +1,13 @@
 use pqcrypto_dilithium::dilithium2::{
-    detached_sign, verify_detached_signature, generate_keypair, 
+    detached_sign, verify_detached_signature, keypair, 
     PublicKey, SecretKey, DetachedSignature
 };
-use pqcrypto_traits::sign::{PublicKey as TraitPK, SecretKey as TraitSK};
+// Explicitly import signature traits to expose .as_bytes() and .from_bytes()
+use pqcrypto_traits::sign::{
+    DetachedSignature as DetachedSignatureTrait, 
+    PublicKey as PublicKeyTrait, 
+    SecretKey as SecretKeyTrait
+};
 use sha3::{Digest, Sha3_256};
 
 pub struct VeloKeyPair {
@@ -13,7 +18,7 @@ pub struct VeloKeyPair {
 impl VeloKeyPair {
     /// Generates a fresh, post-quantum CRYSTALS-Dilithium2 keypair
     pub fn generate() -> Self {
-        let (pk, sk) = generate_keypair();
+        let (pk, sk) = keypair();
         VeloKeyPair {
             public_key: pk,
             secret_key: sk,
@@ -52,7 +57,6 @@ pub fn verify_signature(message: &[u8], signature_bytes: &[u8], pk: &PublicKey) 
 mod tests {
     use super::*;
 
-    // FIXED: Changed '@test' to standard Rust macro formatting '#[test]'
     #[test]
     fn test_quantum_crypto_flow() {
         let keys = VeloKeyPair::generate();
