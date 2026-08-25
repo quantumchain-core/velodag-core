@@ -1,11 +1,8 @@
 // vdag-consensus/src/pow.rs
 
-use sha3::{Digest, Sha3_256};
-use crate::ghostdag::Block;
+use crate::VeloBlock;
 
-/// Configuration structure for mining target thresholds
 pub struct PowManager {
-    // Defines how many leading zeros or how small the target hash value must be
     pub target_difficulty: [u8; 32], 
 }
 
@@ -14,49 +11,27 @@ impl PowManager {
         Self { target_difficulty }
     }
 
-    /// Serializes block parameters into a unique byte payload for hashing
-    pub fn serialize_header(block: &Block) -> Vec<u8> {
-        let mut header_bytes = Vec::new();
-        
-        // Append all parent hashes to make the proof unique to this DAG position
-        for parent in &block.parents {
-            header_bytes.extend_from_slice(parent);
-        }
-        
-        header_bytes.extend_from_slice(&block.timestamp.to_le_bytes());
-        header_bytes.extend_from_slice(&block.nonce.to_le_bytes());
-        header_bytes
-    }
-
-    /// MINING ENGINE: Increments the block nonce until the header hash meets the target criteria
-    pub fn mine_block(&self, block: &mut Block) -> [u8; 32] {
+    /// MINING ENGINE: Modifies the block header nonce until the resulting hash satisfies difficulty criteria
+    pub fn mine_block(&self, block: &mut VeloBlock) -> [u8; 32] {
         loop {
-            let header = Self::serialize_header(block);
-            let mut hasher = Sha3_256::new();
-            hasher.update(&header);
-            let result = hasher.finalize();
+            let hash = block.calculate_hash();
             
-            // Check if the resulting hash is below our target difficulty threshold
-            if result.as_slice() <= self.target_difficulty.as_slice() {
-                let mut valid_hash = [0u8; 32];
-                valid_hash.copy_from_slice(result.as_slice());
-                return valid_hash;
+            // Check if hash matches difficulty threshold boundaries
+            if hash <= self.target_difficulty {
+                return hash;
             }
             
-            block.nonce += 1; // Try the next nonce mutation
+            block.header.nonce += 1;
         }
     }
 
-    /// VERIFICATION ENGINE: Instant validation of incoming blocks propagated by peers
-    pub fn verify_pow(&self, block: &Block, expected_hash: &[u8; 32]) -> bool {
-        let header = Self::serialize_header(block);
-        let mut hasher = Sha3_256::new();
-        hasher.update(&header);
-        let result = hasher.finalize();
-        
-        result.as_slice() == expected_hash && result.as_slice() <= self.target_difficulty.as_slice()
+    /// VERIFICATION ENGINE: Used by peer nodes to validate inbound blocks instantly
+    pub fn verify_pow(&self, block: &VeloBlock) -> bool {
+        let hash = block.calculate_hash();
+        hash <= self.target_difficulty
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
