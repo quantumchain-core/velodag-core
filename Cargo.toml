@@ -2,7 +2,8 @@
 members = [
     "vdag-node",
     "vdag-crypto",
-    "vdag-consensus"
+    "vdag-consensus",
+    "vdag-network"
 ]
 resolver = "2"
 
