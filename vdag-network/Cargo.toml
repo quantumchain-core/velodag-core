@@ -1,0 +1,9 @@
+[package]
+name = "vdag-network"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1.38", features = ["full"] }
+libp2p = { version = "0.53", features = ["tokio", "tcp", "noise", "yamux", "gossipsub", "mdns"] }
+futures = "0.3"
