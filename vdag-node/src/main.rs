@@ -21,7 +21,6 @@ async fn main() {
     if args.len() > 2 && args[1] == "--get-block" {
         println!("🔍 [VeloDAG Explorer] Querying database ledger for target hash key...");
         
-        // Use the corrected internal hex decoder utility function call
         if let Ok(target_hash_vec) = hex::decode_str(&args[2]) {
             if target_hash_vec.len() == 32 {
                 let mut target_hash = [0u8; 32];
@@ -139,7 +138,7 @@ async fn main() {
 
         println!("--------------------------------------------------");
         
-        // Simulate automated background transaction transactions
+        // Simulate automated background transactions
         for i in 1..=3 {
             let sender_keys = VeloKeyPair::generate();
             let sender_addr = VeloKeyPair::derive_address(&sender_keys.public_key);
@@ -210,3 +209,6 @@ async fn main() {
                 }
                 Err(e) => {
                     eprintln!("[💾 Storage Engine Error] Failed to write block: {}", e);
+                }
+            }
+
