@@ -1,0 +1,37 @@
+name: VeloDAG Core CI
+
+# Trigger this workflow automatically on every push or pull request to the main branch
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build_and_test:
+    name: Compile & Run Test Suite
+    runs-on: ubuntu-latest
+
+    steps:
+    # Step 1: Clone the repository bytes into the runner environment
+    - name: Checkout Codebase
+      uses: actions/checkout@v4
+
+    # Step 2: Install the stable Rust toolchain compiler
+    - name: Install Rust Toolchain
+      uses: dtolnay/rust-toolchain@stable
+
+    # Step 3: Set up automatic cargo caching to make builds faster on future commits
+    - name: Configure Cargo Cache
+      uses: swatinem/rust-cache@v2
+
+    # Step 4: Run 'cargo check' to ensure syntax and types are 100% valid
+    - name: Syntax & Type Validation
+      run: cargo check --workspace --all-targets
+
+    # Step 5: Execute all embedded workspace unit tests (such as our Dilithium2 math checks)
+    - name: Execute Workspace Unit Tests
+      run: cargo test --workspace --verbose
