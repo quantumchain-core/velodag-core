@@ -9,8 +9,7 @@ use tokio::time::interval;
 use libp2p::{
     futures::StreamExt,
     gossipsub::{IdentTopic, MessageAuthenticity, ConfigBuilder},
-    swarm::SwarmBuilder,
-    identity, noise, tcp, yamux,
+    identity, noise, tcp, yamux, SwarmBuilder, // SwarmBuilder imported correctly from root here
 };
 
 use vdag_consensus::{
@@ -39,7 +38,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let local_peer_id = libp2p::PeerId::from(local_key.public());
     println!("🆔 Local P2P Node Peer ID: {}", local_peer_id);
 
-    // Build the underlying encrypted TCP network transport stream layer
+    // Build the underlying encrypted TCP network transport stream layer matching libp2p v0.53 layout rules
     let mut swarm = SwarmBuilder::with_existing_identity(local_key)
         .with_tokio()
         .with_tcp(tcp::Config::default(), noise::Config::new, yamux::Config::default)?
@@ -130,7 +129,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             block_height, encode_hex(&block_hash[0..8]), next_block.header.nonce
                         );
 
-                        // --- OUTBOUND BROADCAST ENGINE FLAG ---
                         // Broadcast our new block automatically to all connected network nodes
                         if let Ok(encoded_payload) = bincode::serialize(&next_block) {
                             let _ = swarm.behaviour_mut().publish(block_topic.clone(), encoded_payload);
