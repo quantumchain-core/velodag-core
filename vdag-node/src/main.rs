@@ -170,7 +170,7 @@ async fn main() {
                 timestamp,
                 parents: current_tips.clone(),
                 tx_merkle_root: [0u8; 32], 
-                nonce: 0, // Reset to 0 so the miner can iterate through mutations safely
+                nonce: 0, 
                 height: block_height,
             },
             transactions: transactions_to_confirm,
@@ -184,7 +184,7 @@ async fn main() {
         next_block.coinbase_dev_output = dev_reward;
 
         if next_block.verify_coinbase_rewards() {
-            // Run actual Proof-of-Work mining on the block payload structure configuration
+            // Run actual Proof-of-Work mining on the block payload
             let pow_manager = PowManager::new(current_difficulty_target);
             let block_hash = pow_manager.mine_block(&mut next_block);
             
@@ -212,3 +212,4 @@ async fn main() {
                 }
             }
 
+            // Recalculate dynamic difficulty target metrics bounds for the next epoch processing
