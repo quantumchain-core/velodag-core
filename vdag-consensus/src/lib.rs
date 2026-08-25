@@ -1,11 +1,10 @@
 pub mod ghostdag;
 pub mod pow;
 
-// ... Your existing imports follow right below:
-// use sha3::{Digest, Sha3_256};
-// use serde::{Serialize, Deserialize};
 use sha3::{Digest, Sha3_256};
 use serde::{Serialize, Deserialize};
+use std::collections::HashMap;
+use ghostdag::GhostdagData;
 
 // --- CONSTANTS FOR VELODAG EMISSION (20-Year Supply Blueprint) ---
 pub const INITIAL_BLOCK_REWARD: u64 = 83_238; 
@@ -37,7 +36,6 @@ pub struct VeloBlock {
     pub coinbase_dev_output: u64,
 }
 
-
 impl VeloBlock {
     /// Computes a unique cryptographic SHA3-256 identification hash for the block
     pub fn calculate_hash(&self) -> [u8; 32] {
@@ -58,17 +56,13 @@ impl VeloBlock {
 
     /// Calculated dynamic block emissions and enforces the 5% dev tax split
     pub fn calculate_subsidy_split(height: u64) -> (u64, u64) {
-        // Calculate how many halvings have occurred based on the block height
         let era = height / BLOCKS_PER_ERA;
-        
-        // Right shift operation to cleanly half the reward each era without float values
         let total_subsidy = INITIAL_BLOCK_REWARD >> era;
         
         if total_subsidy == 0 {
-            return (0, 0); // Hard-cap limit hit, max supply achieved
+            return (0, 0); 
         }
 
-        // Calculate the consensus tax splits
         let dev_share = (total_subsidy * DEV_TAX_PERCENTAGE) / 100;
         let miner_share = total_subsidy - dev_share;
 
@@ -78,16 +72,12 @@ impl VeloBlock {
     /// Strict protocol gatekeeper. Validates that the block rewards perfectly match consensus rules.
     pub fn verify_coinbase_rewards(&self) -> bool {
         let (expected_miner, expected_dev) = Self::calculate_subsidy_split(self.header.height);
-        
-        // Block will be instantly rejected by network peers if miner modifies rewards
         self.coinbase_miner_output == expected_miner && self.coinbase_dev_output == expected_dev
     }
 }
-use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
 pub struct Mempool {
-    // Stores unconfirmed transactions keyed by their unique identifier
     pub pending_transactions: HashMap<[u8; 32], Transaction>,
 }
 
@@ -109,7 +99,6 @@ impl Mempool {
         let mut tx_id = [0u8; 32];
         tx_id.copy_from_slice(&hasher.finalize());
 
-        // Avoid transaction duplicates
         if self.pending_transactions.contains_key(&tx_id) {
             return false;
         }
@@ -131,33 +120,79 @@ impl Mempool {
         batch
     }
 }
+
 pub struct BlockchainStorage {
+    blocks_tree: sled::Tree,
+    ghostdag_tree: sled::Tree,
     db: sled::Db,
 }
 
 impl BlockchainStorage {
-    /// Opens or initializes a local database folder named "velodag_ledger_data" on disk
+    /// Opens local storage and configures tree structures for explicit state isolation
     pub fn open() -> Self {
         let db = sled::open("velodag_ledger_data").expect("Failed to initialize storage database context");
-        BlockchainStorage { db }
+        
+        // Open named sub-trees to separate raw blocks from consensus scoring metadata
+        let blocks_tree = db.open_tree(b"blocks").expect("Failed to open blocks data tree");
+        let ghostdag_tree = db.open_tree(b"ghostdag").expect("Failed to open ghostdag metadata tree");
+        
+        BlockchainStorage { 
+            blocks_tree, 
+            ghostdag_tree,
+            db 
+        }
     }
 
-    /// Serializes a VeloBlock into raw binary bytes and writes it permanently to disk using its block hash as the key
+    /// Serializes a VeloBlock into raw binary bytes and writes it permanently to disk
     pub fn save_block(&self, block_hash: &[u8; 32], block: &VeloBlock) -> Result<(), Box<dyn std::error::Error>> {
         let serialized_bytes = bincode::serialize(block)?;
-        self.db.insert(block_hash, serialized_bytes)?;
-        self.db.flush()?; // Force disk sync instantly to prevent database corruption
+        self.blocks_tree.insert(block_hash, serialized_bytes)?;
+        self.db.flush()?; 
         Ok(())
     }
 
-    /// Reads database bytes from disk using a block hash key and deserializes it back into a valid VeloBlock object structure
+    /// Reads database bytes from disk using a block hash key and deserializes it back into a VeloBlock
     pub fn load_block(&self, block_hash: &[u8; 32]) -> Result<Option<VeloBlock>, Box<dyn std::error::Error>> {
-        if let Some(bytes) = self.db.get(block_hash)? {
+        if let Some(bytes) = self.blocks_tree.get(block_hash)? {
             let block: VeloBlock = bincode::deserialize(&bytes)?;
             Ok(Some(block))
         } else {
             Ok(None)
         }
     }
+
+    /// Persists GHOSTDAG coloring meta-states directly to database disk blocks
+    pub fn save_ghostdag_data(&self, block_hash: &[u8; 32], data: &GhostdagData) -> Result<(), Box<dyn std::error::Error>> {
+        let serialized_bytes = bincode::serialize(data)?;
+        self.ghostdag_tree.insert(block_hash, serialized_bytes)?;
+        self.db.flush()?;
+        Ok(())
+    }
+
+    /// Loads historical GHOSTDAG color frameworks mapping to an existing block hash identification string
+    pub fn load_ghostdag_data(&self, block_hash: &[u8; 32]) -> Result<Option<GhostdagData>, Box<dyn std::error::Error>> {
+        if let Some(bytes) = self.ghostdag_tree.get(block_hash)? {
+            let data: GhostdagData = bincode::deserialize(&bytes)?;
+            Ok(Some(data))
+        } else {
+            Ok(None)
+        }
+    }
 }
 
+#[cfg(test)]
+mod consensus_tests {
+    use super::*;
+
+    #[test]
+    fn test_subsidy_values_and_halving() {
+        // First Era verification
+        let (miner_0, dev_0) = VeloBlock::calculate_subsidy_split(0);
+        assert_eq!(miner_0 + dev_0, INITIAL_BLOCK_REWARD);
+        assert_eq!(dev_0, (INITIAL_BLOCK_REWARD * DEV_TAX_PERCENTAGE) / 100);
+
+        // Verification after first 4-year cycle threshold
+        let (miner_era1, dev_era1) = VeloBlock::calculate_subsidy_split(BLOCKS_PER_ERA + 1);
+        assert_eq!(miner_era1 + dev_era1, INITIAL_BLOCK_REWARD >> 1);
+    }
+}
