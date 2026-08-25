@@ -1,3 +1,9 @@
+pub mod ghostdag;
+pub mod pow;
+
+// ... Your existing imports follow right below:
+// use sha3::{Digest, Sha3_256};
+// use serde::{Serialize, Deserialize};
 use sha3::{Digest, Sha3_256};
 use serde::{Serialize, Deserialize};
 
