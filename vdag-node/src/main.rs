@@ -24,8 +24,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
 
     // 1. Process Explorer CLI Flags
-    if args.len() > 2 && args[1] == "--get-block" {
-        run_explorer(&storage_engine, &args[2]);
+    if args.len() > 2 && args == "--get-block" {
+        run_explorer(&storage_engine, &args);
         return Ok(());
     }
 
@@ -38,11 +38,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let local_peer_id = libp2p::PeerId::from(local_key.public());
     println!("🆔 Local P2P Node Peer ID: {}", local_peer_id);
 
-    // Provide explicit type signature annotations to clear up E0283
+    // Explicitly type the closure return signature to guarantee clean type resolution
     let mut swarm = SwarmBuilder::with_existing_identity(local_key)
         .with_tokio()
         .with_tcp(tcp::Config::default(), noise::Config::new, yamux::Config::default)?
-        .with_behaviour(|key| {
+        .with_behaviour(|key| -> GossipsubBehaviour {
             let gossipsub_config = ConfigBuilder::default().build().unwrap();
             GossipsubBehaviour::new(MessageAuthenticity::Signed(key.clone()), gossipsub_config).unwrap()
         })?
