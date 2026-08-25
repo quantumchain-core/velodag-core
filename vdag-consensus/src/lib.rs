@@ -1,5 +1,6 @@
 pub mod ghostdag;
 pub mod pow;
+pub mod daa;
 
 use sha3::{Digest, Sha3_256};
 use serde::{Serialize, Deserialize};
