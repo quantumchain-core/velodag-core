@@ -42,48 +42,29 @@ impl DifficultyManager {
         // 2. Calculate the expected time target for this number of blocks
         let expected_time = self.target_block_interval * (self.window_size as u64 - 1);
 
-        // 3. Compute adjustment ratio
-        // Big number conversion mechanics to adjust the target hash array without float types
-        let mut target_u256 = u256_from_bytes(current_target);
+        // 3. Compute adjustment ratio safely using a native u128 frame
+        // Extract the leading 16 bytes to manipulate difficulty bits safely
+        let mut high_bytes = [0u8; 16];
+        high_bytes.copy_from_slice(&current_target[0..16]);
+        let mut target_val = u128::from_be_bytes(high_bytes);
 
-        // If the blocks were mined too fast (actual < expected), target needs to shrink (harder)
-        // If the blocks were mined too slow (actual > expected), target needs to expand (easier)
-        target_u256 = (target_u256 * actual_time_elapsed) / expected_time;
+        // Perform the scaling math: target = (target * actual_time) / expected_time
+        // If blocks are found too fast, actual_time < expected_time, target shrinks (harder difficulty)
+        target_val = (target_val * actual_time_elapsed as u128) / expected_time as u128;
 
-        // Ensure target doesn't overflow max bounds (an array of 0xFF represents absolute absolute minimum difficulty)
+        // Reconstruct the 32-byte hash array output
+        let mut next_target = [0xff; 32]; // Padding tail end with maximum values
+        let new_high_bytes = target_val.to_be_bytes();
+        next_target[0..16].copy_from_slice(&new_high_bytes);
+
+        // Ensure target doesn't overflow absolute minimum difficulty boundary configurations
         let max_target = [0xff; 32];
-        let calculated_bytes = bytes_from_u256(target_u256);
-
-        if calculated_bytes > max_target {
+        if next_target > max_target {
             max_target
         } else {
-            calculated_bytes
+            next_target
         }
     }
-}
-
-// --- HELPER COMPUTE MATRICES FOR BIG INT MANIPULATION ---
-
-fn u256_from_bytes(bytes: [u8; 32]) -> Vec<u64> {
-    // Simple 4-limb representation of big integers to execute math across 32-byte arrays safely
-    let mut limbs = vec![0u64; 4];
-    for i in 0..4 {
-        let start = i * 8;
-        let mut limb_bytes = [0u8; 8];
-        limb_bytes.copy_from_slice(&bytes[start..start + 8]);
-        limbs[i] = u64::from_le_bytes(limb_bytes);
-    }
-    limbs
-}
-
-fn bytes_from_u256(limbs: Vec<u64>) -> [u8; 32] {
-    let mut bytes = [0u8; 32];
-    for i in 0..4 {
-        let start = i * 8;
-        let limb_bytes = limbs[i].to_le_bytes();
-        bytes[start..start + 8].copy_from_slice(&limb_bytes);
-    }
-    bytes
 }
 
 #[cfg(test)]
@@ -111,7 +92,7 @@ mod tests {
         let manager = DifficultyManager::new(1, 4); // 1 second target, window size of 4 blocks
         let base_target = [0x7f; 32];
 
-        // Create 4 blocks that arrived 0 seconds apart (impossible speed)
+        // Create 4 blocks that arrived 0 seconds apart (excessive speed)
         let blocks = vec![
             create_mock_block_with_time(1000),
             create_mock_block_with_time(1000),
@@ -121,7 +102,7 @@ mod tests {
 
         let next_target = manager.calculate_next_target(&blocks, base_target);
         
-        // Target value should be smaller (closer to 0) which implies a harder difficulty gate
+        // Target value should be smaller (closer to 0x00) which implies a harder cryptographic challenge
         assert!(next_target < base_target);
     }
 }
