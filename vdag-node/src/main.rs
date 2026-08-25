@@ -1,9 +1,14 @@
+// vdag-node/src/main.rs
+
 use std::env;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::time::interval;
 
-// Import workspace modules
-use vdag_consensus::{VeloBlock, BlockHeader, Mempool, Transaction, BlockchainStorage};
+// Import workspace modules from vdag-consensus
+use vdag_consensus::{
+    VeloBlock, BlockHeader, Mempool, Transaction, BlockchainStorage,
+    ghostdag::GhostdagManager, pow::PowManager, daa::DifficultyManager
+};
 use vdag_crypto::VeloKeyPair;
 
 #[tokio::main]
@@ -16,7 +21,7 @@ async fn main() {
     if args.len() > 2 && args[1] == "--get-block" {
         println!("🔍 [VeloDAG Explorer] Querying database ledger for target hash key...");
         
-        // Decode the input string hex argument back into raw database bytes
+        // Use the corrected internal hex decoder utility function call
         if let Ok(target_hash_vec) = hex::decode_str(&args[2]) {
             if target_hash_vec.len() == 32 {
                 let mut target_hash = [0u8; 32];
@@ -36,6 +41,14 @@ async fn main() {
                         println!("• Parent DAG Tips:");
                         for parent in &block.header.parents {
                             println!("   └── 0x{}", hex::encode(&parent[0..8]));
+                        }
+                        
+                        // Output Phase 5 GHOSTDAG coloring statistics from the database
+                        if let Ok(Some(dag_data)) = storage_engine.load_ghostdag_data(&target_hash) {
+                            println!("• GHOSTDAG Score: {}", dag_data.blue_score);
+                            println!("• Selected Parent: {}", dag_data.selected_parent.map(|h| format!("0x{}", hex::encode(&h[0..4]))).unwrap_or_else(|| "None".to_string()));
+                            println!("• Blue Cluster Count: {}", dag_data.blues.len());
+                            println!("• Red Cluster Count : {}", dag_data.reds.len());
                         }
                         println!("==================================================\n");
                         return;
@@ -60,6 +73,12 @@ async fn main() {
     println!("🚀 Initializing VeloDAG Core Node [Ticker: VDAG] ");
     println!("==================================================");
 
+    // 2. Initialize Core Consensus Subsystems
+    let mut ghostdag = GhostdagManager::new(3); // K-factor of 3
+    let difficulty_manager = DifficultyManager::new(1, 4); // 1-second interval target, 4-block sliding DAA window
+    let mut current_difficulty_target = [0x0f; 32]; // Base initial difficulty target limit
+    let mut block_history: Vec<VeloBlock> = Vec::new();
+
     // GENESIS CHECK
     let genesis_hash = [0u8; 32];
     match storage_engine.load_block(&genesis_hash) {
@@ -78,11 +97,26 @@ async fn main() {
                 coinbase_miner_output: 0,
                 coinbase_dev_output: 0,
             };
+            
+            // Generate dummy GHOSTDAG state data parameters for Genesis context
+            let genesis_dag_data = ghostdag.calculate_ghostdag_data(&genesis_block, genesis_hash);
+            
             storage_engine.save_block(&genesis_hash, &genesis_block).unwrap();
+            storage_engine.save_ghostdag_data(&genesis_hash, &genesis_dag_data).unwrap();
+            
+            // Seed consensus tracking vectors
+            ghostdag.block_store.insert(genesis_hash, genesis_block.clone());
+            ghostdag.ghostdag_cache.insert(genesis_hash, genesis_dag_data);
+            block_history.push(genesis_block);
+
             println!("[🧱 Genesis Engine] VeloDAG Genesis Block successfully committed to disk!");
         }
-        Ok(Some(_)) => {
+        Ok(Some(genesis_blk)) => {
             println!("[💾 Storage Engine] Genesis block verification confirmed. Resuming ledger context.");
+            let genesis_dag_data = ghostdag.calculate_ghostdag_data(&genesis_blk, genesis_hash);
+            ghostdag.block_store.insert(genesis_hash, genesis_blk.clone());
+            ghostdag.ghostdag_cache.insert(genesis_hash, genesis_dag_data);
+            block_history.push(genesis_blk);
         }
         Err(e) => {
             eprintln!("[💾 Storage Engine Error] Initialization error: {}", e);
@@ -105,6 +139,7 @@ async fn main() {
 
         println!("--------------------------------------------------");
         
+        // Simulate automated background transaction transactions
         for i in 1..=3 {
             let sender_keys = VeloKeyPair::generate();
             let sender_addr = VeloKeyPair::derive_address(&sender_keys.public_key);
@@ -130,55 +165,48 @@ async fn main() {
 
         let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
         let transactions_to_confirm = node_mempool.drain_to_batch(10);
-        let confirmed_tx_count = transactions_to_confirm.len();
 
-        let header = BlockHeader {
-            timestamp,
-            parents: current_tips.clone(),
-            tx_merkle_root: [0u8; 32], 
-            nonce: 2026,
-            height: block_height,
-        };
-
-        let (miner_reward, dev_reward) = VeloBlock::calculate_subsidy_split(block_height);
-
-        let next_block = VeloBlock {
-            header,
+        let mut next_block = VeloBlock {
+            header: BlockHeader {
+                timestamp,
+                parents: current_tips.clone(),
+                tx_merkle_root: [0u8; 32], 
+                nonce: 0, // Reset to 0 so the miner can iterate through mutations safely
+                height: block_height,
+            },
             transactions: transactions_to_confirm,
-            coinbase_miner_output: miner_reward,
-            coinbase_dev_output: dev_reward,
+            coinbase_miner_output: 0,
+            coinbase_dev_output: 0,
         };
+
+        // Inject dynamic subsidy emissions fractions
+        let (miner_reward, dev_reward) = VeloBlock::calculate_subsidy_split(block_height);
+        next_block.coinbase_miner_output = miner_reward;
+        next_block.coinbase_dev_output = dev_reward;
 
         if next_block.verify_coinbase_rewards() {
-            let block_hash = next_block.calculate_hash();
+            // Run actual Proof-of-Work mining on the block payload structure configuration
+            let pow_manager = PowManager::new(current_difficulty_target);
+            let block_hash = pow_manager.mine_block(&mut next_block);
             
+            // Calculate structural GHOSTDAG data arrays matching this iteration
+            let dag_data = ghostdag.calculate_ghostdag_data(&next_block, block_hash);
+
+            // In-memory caching updates for consensus routing loops
+            ghostdag.block_store.insert(block_hash, next_block.clone());
+            ghostdag.ghostdag_cache.insert(block_hash, dag_data.clone());
+            block_history.push(next_block.clone());
+
+            // Persist parameters cleanly down to the physical disk sectors
             match storage_engine.save_block(&block_hash, &next_block) {
                 Ok(_) => {
+                    let _ = storage_engine.save_ghostdag_data(&block_hash, &dag_data);
                     println!(
-                        "[⏱️  Height {:<5}] Block Saved! Hash: {}...",
+                        "[⏱️  Height {:<5}] Block Mined & Saved! Hash: {}... Nonce: {}",
                         block_height,
-                        hex::encode(&block_hash[0..8])
+                        hex::encode(&block_hash[0..8]),
+                        next_block.header.nonce
                     );
                 }
                 Err(e) => {
                     eprintln!("[💾 Storage Engine Error] Failed to write block: {}", e);
-                }
-            }
-
-            current_tips = vec![block_hash];
-        }
-    }
-}
-
-mod hex {
-    pub fn encode(bytes: &[u8]) -> String {
-        bytes.iter().map(|b| format!("{:02x}", b)).collect()
-    }
-
-    pub fn decode_str(s: &str) -> Result<Vec<u8>, std::num::ParseIntError> {
-        (0..s.len())
-            .step_by(2)
-            .map(|i| u8::from_str_radix(&s[i..i + 2], 16))
-            .collect()
-    }
-}
