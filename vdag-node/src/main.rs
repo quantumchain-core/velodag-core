@@ -1,9 +1,17 @@
-pub mod network;
 // vdag-node/src/main.rs
+
+pub mod network;
 
 use std::env;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::time::interval;
+
+use libp2p::{
+    futures::StreamExt,
+    gossipsub::{IdentTopic, MessageAuthenticity, ConfigBuilder},
+    swarm::SwarmBuilder,
+    identity, noise, tcp, yamux,
+};
 
 use vdag_consensus::{
     VeloBlock, BlockHeader, Mempool, Transaction, BlockchainStorage,
@@ -12,27 +20,51 @@ use vdag_consensus::{
 use vdag_crypto::VeloKeyPair;
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let storage_engine = BlockchainStorage::open();
     let args: Vec<String> = env::args().collect();
 
     // 1. Process Explorer CLI Flags
     if args.len() > 2 && args[1] == "--get-block" {
         run_explorer(&storage_engine, &args[2]);
-        return;
+        return Ok(());
     }
 
     println!("==================================================");
     println!("🚀 Initializing VeloDAG Core Node [Ticker: VDAG] ");
     println!("==================================================");
 
+    // 2. Initialize libp2p P2P Network Component Protocols
+    let local_key = identity::Keypair::generate_ed25519();
+    let local_peer_id = libp2p::PeerId::from(local_key.public());
+    println!("🆔 Local P2P Node Peer ID: {}", local_peer_id);
+
+    // Build the underlying encrypted TCP network transport stream layer
+    let mut swarm = SwarmBuilder::with_existing_identity(local_key)
+        .with_tokio()
+        .with_tcp(tcp::Config::default(), noise::Config::new, yamux::Config::default)?
+        .with_behaviour(|key| {
+            let gossipsub_config = ConfigBuilder::default().build().unwrap();
+            libp2p::gossipsub::Behaviour::new(MessageAuthenticity::Signed(key.clone()), gossipsub_config).unwrap()
+        })?
+        .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
+        .build();
+
+    // Subscribe to global block propagation lanes
+    let block_topic = IdentTopic::new("vdag-blocks");
+    swarm.behaviour_mut().subscribe(&block_topic)?;
+
+    // Start listening on a randomized local TCP port interface
+    swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
+
+    // 3. Initialize Core Consensus Subsystems
     let mut ghostdag = GhostdagManager::new(3); 
     let difficulty_manager = DifficultyManager::new(1, 4); 
     let mut current_difficulty_target = [0x0f; 32]; 
     let mut block_history: Vec<VeloBlock> = Vec::new();
     let genesis_hash = [0u8; 32];
 
-    // 2. Genesis Initialization Engine Check
+    // 4. Genesis Initialization Engine Check
     match storage_engine.load_block(&genesis_hash) {
         Ok(None) => {
             println!("[🧱 Genesis Engine] Minting Genesis Block 0...");
@@ -65,45 +97,60 @@ async fn main() {
     let mut block_height = 0;
     let mut block_timer = interval(Duration::from_secs(1));
 
-    // 3. Core 1-Second Runtime BlockDAG Processing Loop
+    // 5. Unified Async Block Production & P2P Stream Selection Loop
     loop {
-        block_timer.tick().await;
-        block_height += 1;
-        println!("--------------------------------------------------");
-        
-        simulate_transactions(&mut node_mempool);
+        tokio::select! {
+            // Channel A: Run block production ticking every second
+            _ = block_timer.tick() => {
+                block_height += 1;
+                println!("--------------------------------------------------");
+                
+                simulate_transactions(&mut node_mempool);
 
-        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-        let (miner_reward, dev_reward) = VeloBlock::calculate_subsidy_split(block_height);
-        
-        let mut next_block = create_block(current_tips.clone(), block_height, miner_reward, dev_reward);
-        next_block.header.timestamp = timestamp;
-        next_block.transactions = node_mempool.drain_to_batch(10);
+                let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+                let (miner_reward, dev_reward) = VeloBlock::calculate_subsidy_split(block_height);
+                
+                let mut next_block = create_block(current_tips.clone(), block_height, miner_reward, dev_reward);
+                next_block.header.timestamp = timestamp;
+                next_block.transactions = node_mempool.drain_to_batch(10);
 
-        if next_block.verify_coinbase_rewards() {
-            let pow_manager = PowManager::new(current_difficulty_target);
-            let block_hash = pow_manager.mine_block(&mut next_block);
-            let dag_data = ghostdag.calculate_ghostdag_data(&next_block, block_hash);
+                if next_block.verify_coinbase_rewards() {
+                    let pow_manager = PowManager::new(current_difficulty_target);
+                    let block_hash = pow_manager.mine_block(&mut next_block);
+                    let dag_data = ghostdag.calculate_ghostdag_data(&next_block, block_hash);
 
-            ghostdag.block_store.insert(block_hash, next_block.clone());
-            ghostdag.ghostdag_cache.insert(block_hash, dag_data.clone());
-            block_history.push(next_block.clone());
+                    ghostdag.block_store.insert(block_hash, next_block.clone());
+                    ghostdag.ghostdag_cache.insert(block_hash, dag_data.clone());
+                    block_history.push(next_block.clone());
 
-            if storage_engine.save_block(&block_hash, &next_block).is_ok() {
-                let _ = storage_engine.save_ghostdag_data(&block_hash, &dag_data);
-                println!(
-                    "[⏱️ Height {:<5}] Block Mined! Hash: {}... Nonce: {}",
-                    block_height, encode_hex(&block_hash[0..8]), next_block.header.nonce
-                );
+                    if storage_engine.save_block(&block_hash, &next_block).is_ok() {
+                        let _ = storage_engine.save_ghostdag_data(&block_hash, &dag_data);
+                        println!(
+                            "[⏱️ Height {:<5}] Block Mined Locally! Hash: {}... Nonce: {}",
+                            block_height, encode_hex(&block_hash[0..8]), next_block.header.nonce
+                        );
+
+                        // --- OUTBOUND BROADCAST ENGINE FLAG ---
+                        // Broadcast our new block automatically to all connected network nodes
+                        if let Ok(encoded_payload) = bincode::serialize(&next_block) {
+                            let _ = swarm.behaviour_mut().publish(block_topic.clone(), encoded_payload);
+                        }
+                    }
+
+                    current_difficulty_target = difficulty_manager.calculate_next_target(&block_history, current_difficulty_target);
+                    current_tips = vec![block_hash];
+                }
             }
-
-            current_difficulty_target = difficulty_manager.calculate_next_target(&block_history, current_difficulty_target);
-            current_tips = vec![block_hash];
+            
+            // Channel B: Continuously pump background network events from peer nodes
+            network_event = swarm.select_next_some() => {
+                let _ = network::handle_p2p_events(network_event, &storage_engine, &mut ghostdag);
+            }
         }
     }
 }
 
-// --- OUT-OF-LOOP ISOLATED HELPER UTILITIES ---
+// --- UTILITIES ---
 
 fn create_block(parents: Vec<[u8; 32]>, height: u64, miner: u64, dev: u64) -> VeloBlock {
     VeloBlock {
