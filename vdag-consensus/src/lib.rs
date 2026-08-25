@@ -75,3 +75,52 @@ impl VeloBlock {
         self.coinbase_miner_output == expected_miner && self.coinbase_dev_output == expected_dev
     }
 }
+use std::collections::HashMap;
+
+#[derive(Debug, Clone)]
+pub struct Mempool {
+    // Stores unconfirmed transactions keyed by their unique identifier
+    pub pending_transactions: HashMap<[u8; 32], Transaction>,
+}
+
+impl Mempool {
+    pub fn new() -> Self {
+        Mempool {
+            pending_transactions: HashMap::new(),
+        }
+    }
+
+    /// Inserts a newly received transaction into the unconfirmed queue
+    pub fn add_transaction(&mut self, tx: Transaction) -> bool {
+        let mut hasher = Sha3_256::new();
+        hasher.update(&tx.sender);
+        hasher.update(&tx.recipient);
+        hasher.update(&tx.amount.to_le_bytes());
+        hasher.update(&tx.signature);
+        
+        let mut tx_id = [0u8; 32];
+        tx_id.copy_from_slice(&hasher.finalize());
+
+        // Avoid transaction duplicates
+        if self.pending_transactions.contains_key(&tx_id) {
+            return false;
+        }
+
+        self.pending_transactions.insert(tx_id, tx);
+        true
+    }
+
+    /// Pulls transactions out of the queue to package them cleanly inside a 1-second block
+    pub fn drain_to_batch(&mut self, max_batch_size: usize) -> Vec<Transaction> {
+        let mut batch = Vec::new();
+        let keys: Vec<[u8; 32]> = self.pending_transactions.keys().cloned().take(max_batch_size).collect();
+        
+        for key in keys {
+            if let Some(tx) = self.pending_transactions.remove(&key) {
+                batch.push(tx);
+            }
+        }
+        batch
+    }
+}
+
