@@ -1,10 +1,8 @@
 // vdag-node/src/network.rs
 
 use std::error::Error;
-use libp2p::{
-    gossipsub::{Event, Message, IdentTopic},
-    swarm::SwarmEvent,
-};
+use libp2p::gossipsub::{Event, Message, IdentTopic};
+use libp2p::swarm::SwarmEvent;
 use vdag_consensus::{VeloBlock, BlockchainStorage, ghostdag::GhostdagManager};
 
 /// NETWORK TOPOLOGY GATES: Handles all asynchronous incoming network packets from remote peers
@@ -34,27 +32,21 @@ fn process_incoming_packet(
     storage: &BlockchainStorage,
     ghostdag: &mut GhostdagManager,
 ) -> Result<(), Box<dyn Error>> {
-    // Check if the received topic matches our global consensus transaction/block rail
     if message.topic == IdentTopic::new("vdag-blocks").hash() {
-        // Deserialize the raw incoming network payload bytes back into a VeloBlock struct
         if let Ok(incoming_block) = bincode::deserialize::<VeloBlock>(&message.data) {
             let incoming_hash = incoming_block.calculate_hash();
 
-            // Validate that we do not already have this block persisted on disk
             if storage.load_block(&incoming_hash)?.is_none() {
                 println!(
                     "📥 [Network Influx] Received New Block from Peer! Height: {}, Hash: 0x{:02x}{:02x}...",
-                    incoming_block.header.height, incoming_hash[0], incoming_hash[1]
+                    incoming_block.header.height, incoming_hash, incoming_hash
                 );
 
-                // Calculate the topological sorting properties of the block relative to our DAG graph state
                 let dag_data = ghostdag.calculate_ghostdag_data(&incoming_block, incoming_hash);
 
-                // Commit the peer's block state directly down to physical disk
-                storage.save_block(&incoming_hash, &incoming_block)?;
-                storage.save_ghostdag_data(&incoming_hash, &dag_data)?;
+                let _ = storage.save_block(&incoming_hash, &incoming_block);
+                let _ = storage.save_ghostdag_data(&incoming_hash, &dag_data);
 
-                // Cache it into memory so our mining loop references it as a parent tip in the next interval
                 ghostdag.block_store.insert(incoming_hash, incoming_block);
                 ghostdag.ghostdag_cache.insert(incoming_hash, dag_data);
             }
