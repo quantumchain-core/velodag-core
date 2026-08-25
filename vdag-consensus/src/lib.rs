@@ -1,34 +1,36 @@
 use sha3::{Digest, Sha3_256};
+use serde::{Serialize, Deserialize};
 
-// --- CONSTANTS FOR VALODAG EMISSION (As calculated in our 20-Year Blueprint) ---
-pub const INITIAL_BLOCK_REWARD: u64 = 83_238; // 0.083238 VDAG (represented in atomic units/satoshis to avoid floating-point errors)
-pub const DEV_TAX_PERCENTAGE: u64 = 5;       // 5% Consensus-enforced Development Treasury Tax
-pub const BLOCKS_PER_ERA: u64 = 126_144_000; // Halving happens exactly every 4 years (31,536,000 seconds/year * 4)
+// --- CONSTANTS FOR VELODAG EMISSION (20-Year Supply Blueprint) ---
+pub const INITIAL_BLOCK_REWARD: u64 = 83_238; 
+pub const DEV_TAX_PERCENTAGE: u64 = 5;       
+pub const BLOCKS_PER_ERA: u64 = 126_144_000; 
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlockHeader {
     pub timestamp: u64,
-    pub parents: Vec<[u8; 32]>, // Directed Acyclic Graph pointers (allows multiple parent blocks)
+    pub parents: Vec<[u8; 32]>, 
     pub tx_merkle_root: [u8; 32],
     pub nonce: u64,
     pub height: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Transaction {
-    pub sender: [u8; 32],      // Dilithium2 public key hash (Wallet Address)
-    pub recipient: [u8; 32],   // Recipient wallet address
-    pub amount: u64,           // Amount in atomic units
-    pub signature: Vec<u8>,    // CRYSTALS-Dilithium2 signature signature payload
+    pub sender: [u8; 32],      
+    pub recipient: [u8; 32],   
+    pub amount: u64,           
+    pub signature: Vec<u8>,    
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VeloBlock {
     pub header: BlockHeader,
     pub transactions: Vec<Transaction>,
     pub coinbase_miner_output: u64,
     pub coinbase_dev_output: u64,
 }
+
 
 impl VeloBlock {
     /// Computes a unique cryptographic SHA3-256 identification hash for the block
