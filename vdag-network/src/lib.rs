@@ -7,9 +7,7 @@ use std::error::Error;
 use std::time::Duration;
 
 // Construct a custom behavior combining peer discovery (mDNS) and messaging (Gossipsub)
-// The macro attribute explicitly names the generated event enum to prevent compiler scope mismatch
 #[derive(libp2p::swarm::NetworkBehaviour)]
-#[behaviour(to_swarm = "VeloNetworkBehaviourEvent")]
 pub struct VeloNetworkBehaviour {
     pub gossipsub: gossipsub::Behaviour,
     pub mdns: mdns::tokio::Behaviour,
@@ -61,20 +59,18 @@ pub async fn start_p2p_engine() -> Result<(), Box<dyn Error>> {
     tokio::spawn(async move {
         loop {
             match swarm.select_next_some().await {
-                // Triggered when a new computer running VeloDAG is discovered on the local network
+                // CORRECTED: In libp2p 0.53, the macro events are nested inside an inner Event enum under your struct name
                 SwarmEvent::Behaviour(VeloNetworkBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
                     for (peer_id, multiaddr) in list {
                         println!("[📡 Discovery] Found active peer node: {} at {}", peer_id, multiaddr);
                         let _ = swarm.dial(multiaddr);
                     }
                 }
-                // Triggered when an external machine drops out of range
                 SwarmEvent::Behaviour(VeloNetworkBehaviourEvent::Mdns(mdns::Event::Expired(list))) => {
                     for (peer_id, _multiaddr) in list {
                         println!("[📡 Discovery] Peer node connection lost: {}", peer_id);
                     }
                 }
-                // Triggered when a network broadcast message containing a new block is received
                 SwarmEvent::Behaviour(VeloNetworkBehaviourEvent::Gossipsub(gossipsub::Event::Message {
                     propagation_source,
                     message_id,
