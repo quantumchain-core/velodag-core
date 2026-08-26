@@ -10,10 +10,28 @@ vdag-crypto = { path = "../vdag-crypto" }
 vdag-network = { path = "../vdag-network" }
 
 # External System Async & Serde Toolchains
-tokio = { version = "1.0", features = ["full"] }
+tokio = { version = "1.38", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 bincode = "1.3.3"
 hex = "0.4"
 
+# Structured logging (subscriber is initialized in main.rs;
+# existing println! call sites can be migrated to tracing:: incrementally)
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
 # Networking Suite
-libp2p = { version = "0.53.2", features = ["gossipsub", "tcp", "noise", "yamux", "mdns", "tokio"] }
+# - "macros" is required for #[derive(NetworkBehaviour)] on the composed VeloBehaviour
+# - "mdns" enables LAN peer auto-discovery
+# - "request-response" + "json" back the block-sync catch-up protocol
+libp2p = { version = "0.53.2", features = [
+    "gossipsub",
+    "tcp",
+    "noise",
+    "yamux",
+    "mdns",
+    "tokio",
+    "macros",
+    "request-response",
+    "json",
+] }
