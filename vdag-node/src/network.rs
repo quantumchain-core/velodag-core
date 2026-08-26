@@ -3,14 +3,24 @@
 // All asynchronous P2P event handling: incoming gossip blocks (with full
 // validation), mDNS peer discovery, and the block-sync request/response
 // protocol.
+//
+// One important property of this file: gossip blocks, orphan replays, and
+// sync catch-up blocks all funnel through the *same* `validate_and_ingest`
+// function. Earlier versions took a shortcut for orphan/sync paths that
+// skipped re-validation or checked PoW against the wrong (current, rather
+// than historical) difficulty target -- that gap is closed by looking up
+// each block's height in `DifficultyLog` rather than assuming "current" is
+// correct.
 
 use std::error::Error;
 
 use libp2p::{gossipsub, mdns, request_response, gossipsub::IdentTopic, swarm::SwarmEvent, Swarm};
+use tracing::{info, warn};
 
 use vdag_consensus::{pow::PowManager, ghostdag::GhostdagManager, BlockchainStorage, VeloBlock};
 
 use crate::behaviour::{VeloBehaviour, VeloBehaviourEvent};
+use crate::difficulty_log::DifficultyLog;
 use crate::sync::{OrphanPool, SyncRequest, SyncResponse, MAX_SYNC_BLOCKS};
 
 /// Shared gossip topic name -- imported by main.rs too, so there's a single
@@ -27,7 +37,8 @@ pub fn handle_p2p_events(
     ghostdag: &mut GhostdagManager,
     orphans: &mut OrphanPool,
     block_history: &mut Vec<VeloBlock>,
-    current_difficulty_target: [u8; 32],
+    difficulty_log: &mut DifficultyLog,
+    live_current_target: [u8; 32],
     genesis_hash: [u8; 32],
 ) -> Result<(), Box<dyn Error>> {
     match event {
@@ -42,21 +53,22 @@ pub fn handle_p2p_events(
                 ghostdag,
                 orphans,
                 block_history,
-                current_difficulty_target,
+                difficulty_log,
+                live_current_target,
             )?;
         }
 
         // --- mDNS: found a peer on the LAN -- dial it and add it as an explicit gossipsub peer ---
         SwarmEvent::Behaviour(VeloBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
             for (peer_id, addr) in list {
-                println!("🔍 [mDNS] Discovered peer {peer_id} at {addr}");
+                info!(%peer_id, %addr, "mDNS discovered peer");
                 swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
                 let _ = swarm.dial(addr);
             }
         }
         SwarmEvent::Behaviour(VeloBehaviourEvent::Mdns(mdns::Event::Expired(list))) => {
             for (peer_id, _addr) in list {
-                println!("👋 [mDNS] Peer expired: {peer_id}");
+                info!(%peer_id, "mDNS peer expired");
                 swarm.behaviour_mut().gossipsub.remove_explicit_peer(&peer_id);
             }
         }
@@ -79,6 +91,8 @@ pub fn handle_p2p_events(
                     ghostdag,
                     orphans,
                     block_history,
+                    difficulty_log,
+                    live_current_target,
                 )?;
             }
         },
@@ -87,16 +101,16 @@ pub fn handle_p2p_events(
             error,
             ..
         })) => {
-            println!("⚠️ [Sync] Outbound request to {peer} failed: {error}");
+            warn!(%peer, %error, "Sync request failed");
         }
 
         SwarmEvent::NewListenAddr { address, .. } => {
-            println!("🌐 [P2P Network] Local Node Listening Live on: {address}");
+            info!(%address, "Local node listening");
         }
 
         // On connect, immediately ask the peer to fill in anything we're missing.
         SwarmEvent::ConnectionEstablished { peer_id, .. } => {
-            println!("🤝 [P2P Network] Remote Connection Settled with Peer: {peer_id}");
+            info!(%peer_id, "Connection established");
             let since_height = block_history.iter().map(|b| b.header.height).max().unwrap_or(0);
             swarm.behaviour_mut().sync.send_request(
                 &peer_id,
@@ -117,7 +131,8 @@ fn handle_gossip_block(
     ghostdag: &mut GhostdagManager,
     orphans: &mut OrphanPool,
     block_history: &mut Vec<VeloBlock>,
-    current_difficulty_target: [u8; 32],
+    difficulty_log: &mut DifficultyLog,
+    live_current_target: [u8; 32],
 ) -> Result<(), Box<dyn Error>> {
     if message.topic != IdentTopic::new(GOSSIP_TOPIC).hash() {
         return Ok(());
@@ -126,7 +141,7 @@ fn handle_gossip_block(
     let incoming_block: VeloBlock = match bincode::deserialize(&message.data) {
         Ok(b) => b,
         Err(_) => {
-            println!("🚫 [Validation] Dropped malformed block payload from peer.");
+            warn!("Dropped malformed block payload from peer");
             return Ok(());
         }
     };
@@ -137,20 +152,26 @@ fn handle_gossip_block(
         ghostdag,
         orphans,
         block_history,
-        current_difficulty_target,
+        difficulty_log,
+        live_current_target,
     )
 }
 
 /// Full consensus validation before a block is allowed anywhere near local
-/// state: reward-split check, proof-of-work check, then parent-existence
-/// check (orphaning it if a parent is missing).
+/// state: reward-split check, proof-of-work check (against the target that
+/// was actually active at that block's height, per `difficulty_log`), then
+/// parent-existence check (orphaning it if a parent is missing).
+///
+/// This is the single validation path used for live gossip blocks, orphan
+/// replays, and sync catch-up blocks alike -- no path takes a shortcut.
 fn validate_and_ingest(
     block: VeloBlock,
     storage: &BlockchainStorage,
     ghostdag: &mut GhostdagManager,
     orphans: &mut OrphanPool,
     block_history: &mut Vec<VeloBlock>,
-    current_difficulty_target: [u8; 32],
+    difficulty_log: &mut DifficultyLog,
+    live_current_target: [u8; 32],
 ) -> Result<(), Box<dyn Error>> {
     let hash = block.calculate_hash();
 
@@ -160,56 +181,67 @@ fn validate_and_ingest(
 
     // 1. Coinbase / dev-tax split must match consensus rules exactly.
     if !block.verify_coinbase_rewards() {
-        println!(
-            "🚫 [Validation] Rejected block at height {}: bad coinbase split.",
-            block.header.height
-        );
+        warn!(height = block.header.height, "Rejected block: bad coinbase split");
         return Ok(());
     }
 
-    // 2. Proof-of-work must satisfy our current difficulty target.
-    //    (Genesis is exempt -- it's never gossiped/mined via PoW.)
+    // 2. Proof-of-work must satisfy the target that was actually in force
+    //    at this block's height -- not necessarily today's "current"
+    //    target, since this block may be an orphan replay or a sync
+    //    catch-up block mined under an older difficulty. Genesis is exempt
+    //    (never gossiped/mined via PoW).
     if block.header.height > 0 {
-        let pow = PowManager::new(current_difficulty_target);
+        let target = difficulty_log.get(block.header.height).unwrap_or(live_current_target);
+        let pow = PowManager::new(target);
         if !pow.verify_pow(&block) {
-            println!(
-                "🚫 [Validation] Rejected block at height {}: insufficient PoW.",
-                block.header.height
-            );
+            warn!(height = block.header.height, "Rejected block: insufficient PoW");
             return Ok(());
         }
+        difficulty_log.record(block.header.height, target);
     }
 
     // 3. Every parent must already be known locally, or this block gets
     //    parked as an orphan until the missing parent arrives.
     for parent in &block.header.parents {
         if ghostdag.block_store.get(parent).is_none() {
-            println!(
-                "🧩 [Orphan] Block at height {} is missing a parent -- buffering.",
-                block.header.height
-            );
+            info!(height = block.header.height, "Missing parent, buffering as orphan");
             orphans.insert(*parent, block);
             return Ok(());
         }
     }
 
-    ingest_block(block, storage, ghostdag, orphans, block_history)
+    let ingested_hash = ingest_block_only(block, storage, ghostdag, block_history)?;
+
+    // A block landing may unblock orphans that were waiting specifically on
+    // it. They go back through this same validate_and_ingest path, so
+    // they're checked against their own height's recorded target rather
+    // than being ingested blind.
+    let ready = orphans.take_ready(&ingested_hash);
+    for orphan in ready {
+        validate_and_ingest(
+            orphan,
+            storage,
+            ghostdag,
+            orphans,
+            block_history,
+            difficulty_log,
+            live_current_target,
+        )?;
+    }
+
+    Ok(())
 }
 
-/// Accepts an already-validated block into the DAG + storage, then
-/// recursively replays any orphans that were waiting specifically on it.
-fn ingest_block(
+/// Writes an already-validated block into the DAG + storage. Does not
+/// validate anything itself -- callers must have already run it through
+/// `validate_and_ingest`'s checks.
+fn ingest_block_only(
     block: VeloBlock,
     storage: &BlockchainStorage,
     ghostdag: &mut GhostdagManager,
-    orphans: &mut OrphanPool,
     block_history: &mut Vec<VeloBlock>,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<[u8; 32], Box<dyn Error>> {
     let hash = block.calculate_hash();
-    if storage.load_block(&hash)?.is_some() {
-        return Ok(());
-    }
-
     let dag_data = ghostdag.calculate_ghostdag_data(&block, hash);
     let _ = storage.save_block(&hash, &block);
     let _ = storage.save_ghostdag_data(&hash, &dag_data);
@@ -219,22 +251,9 @@ fn ingest_block(
     block_history.push(block.clone());
 
     let hex_hash: String = hash[0..8].iter().map(|b| format!("{:02x}", b)).collect();
-    println!(
-        "📥 [Network Influx] Accepted block. Height: {}, Hash: 0x{}",
-        block.header.height, hex_hash
-    );
+    info!(height = block.header.height, hash = %hex_hash, "Accepted block");
 
-    // NOTE: orphans released here skip re-validation for simplicity. In a
-    // stricter setup you'd route them back through validate_and_ingest's
-    // PoW/coinbase checks too -- they were already checked once when first
-    // received, so the main risk skipped here is re-checking against a
-    // *current* difficulty target that may have moved on since.
-    let ready = orphans.take_ready(&hash);
-    for orphan in ready {
-        ingest_block(orphan, storage, ghostdag, orphans, block_history)?;
-    }
-
-    Ok(())
+    Ok(hash)
 }
 
 // --- Sync protocol handling ---------------------------------------------
@@ -245,7 +264,7 @@ fn build_sync_response(
     block_history: &[VeloBlock],
 ) -> SyncResponse {
     if request.genesis_hash != genesis_hash {
-        println!("⚠️ [Sync] Peer requested sync with a different genesis -- refusing.");
+        warn!("Peer requested sync with a different genesis -- refusing");
         return SyncResponse::GenesisMismatch;
     }
 
@@ -256,14 +275,11 @@ fn build_sync_response(
         .cloned()
         .collect();
 
-    println!(
-        "📤 [Sync] Sending {} block(s) (since height {})",
-        blocks.len(),
-        request.since_height
-    );
+    info!(count = blocks.len(), since_height = request.since_height, "Sending sync response");
     SyncResponse::Blocks(blocks)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_sync_response(
     peer: libp2p::PeerId,
     response: SyncResponse,
@@ -272,26 +288,31 @@ fn handle_sync_response(
     ghostdag: &mut GhostdagManager,
     orphans: &mut OrphanPool,
     block_history: &mut Vec<VeloBlock>,
+    difficulty_log: &mut DifficultyLog,
+    live_current_target: [u8; 32],
 ) -> Result<(), Box<dyn Error>> {
     match response {
         SyncResponse::Blocks(blocks) => {
-            println!("📥 [Sync] Received {} catch-up block(s) from {peer}", blocks.len());
+            info!(count = blocks.len(), %peer, "Received sync catch-up blocks");
             for block in blocks {
-                // Sync responses skip PoW re-verification against a possibly
-                // stale difficulty target; they're still checked for
-                // coinbase correctness and parent availability. Tighten
-                // this further (e.g. verify against the target recorded
-                // at that historical height) before treating this as
-                // adversarial-peer-safe.
-                if !block.verify_coinbase_rewards() {
-                    println!("🚫 [Sync] Rejected synced block: bad coinbase split.");
-                    continue;
-                }
-                ingest_block(block, storage, ghostdag, orphans, block_history)?;
+                // Routed through the same validate_and_ingest as everything
+                // else: coinbase check, PoW checked against the recorded
+                // target for that block's own height (falling back to the
+                // live target only if we have no record for it), and
+                // parent-existence / orphan handling.
+                validate_and_ingest(
+                    block,
+                    storage,
+                    ghostdag,
+                    orphans,
+                    block_history,
+                    difficulty_log,
+                    live_current_target,
+                )?;
             }
         }
         SyncResponse::GenesisMismatch => {
-            println!("⚠️ [Sync] Peer {peer} is on a different network. Disconnecting.");
+            warn!(%peer, "Peer is on a different network -- disconnecting");
             let _ = swarm.disconnect_peer_id(peer);
         }
     }
