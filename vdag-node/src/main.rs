@@ -1,12 +1,14 @@
 // vdag-node/src/main.rs
 
 pub mod behaviour;
+pub mod difficulty_log;
 pub mod network;
 pub mod sync;
 
 use std::env;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::time::interval;
+use tracing::{error, info, warn};
 
 use libp2p::{
     futures::StreamExt,
@@ -22,6 +24,7 @@ use vdag_consensus::{
 use vdag_crypto::VeloKeyPair;
 
 use behaviour::{SyncBehaviour, VeloBehaviour};
+use difficulty_log::DifficultyLog;
 use network::GOSSIP_TOPIC;
 use sync::OrphanPool;
 
@@ -31,9 +34,6 @@ const ORPHAN_POOL_MAX: usize = 1024;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Structured logging is initialized here; existing println! call sites
-    // throughout this file/network.rs still work as before and can be
-    // migrated to tracing::info!/warn! incrementally.
     tracing_subscriber::fmt::init();
 
     let storage_engine = BlockchainStorage::open();
@@ -53,15 +53,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .filter_map(|(i, _)| args.get(i + 1).cloned())
         .collect();
 
-    println!("==================================================");
-    println!("🚀 Initializing VeloDAG Core Node [Ticker: VDAG] ");
-    println!("==================================================");
+    info!("==================================================");
+    info!("🚀 Initializing VeloDAG Core Node [Ticker: VDAG] ");
+    info!("==================================================");
 
     // 2. Node identity: persisted across restarts so Peer ID stays stable
     // (bootstrap lists / --dial targets otherwise go stale every run).
     let local_key = load_or_create_identity(IDENTITY_KEY_PATH)?;
     let local_peer_id = libp2p::PeerId::from(local_key.public());
-    println!("🆔 Local P2P Node Peer ID: {}", local_peer_id);
+    info!(%local_peer_id, "Local P2P Node Peer ID");
 
     let mut swarm: Swarm<VeloBehaviour> = SwarmBuilder::with_existing_identity(local_key)
         .with_tokio()
@@ -121,12 +121,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         match addr_str.parse::<Multiaddr>() {
             Ok(remote) => {
                 if let Err(e) = swarm.dial(remote) {
-                    eprintln!("⚠️ Failed to dial {addr_str}: {e}");
+                    warn!(%addr_str, error = %e, "Failed to dial");
                 } else {
-                    println!("📡 Dialing peer at: {addr_str}");
+                    info!(%addr_str, "Dialing peer");
                 }
             }
-            Err(e) => eprintln!("⚠️ Skipping invalid bootstrap/dial address '{addr_str}': {e}"),
+            Err(e) => warn!(%addr_str, error = %e, "Skipping invalid bootstrap/dial address"),
         }
     }
 
@@ -136,12 +136,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut current_difficulty_target = [0x0f; 32];
     let mut block_history: Vec<VeloBlock> = Vec::new();
     let mut orphans = OrphanPool::new(ORPHAN_POOL_MAX);
+    // Records which difficulty target was active at each height, so blocks
+    // validated out of real-time order (orphan replays, sync catch-up) are
+    // checked against the target that was actually in force then, not
+    // whatever "current" happens to be by the time they're processed.
+    let mut difficulty_log = DifficultyLog::new();
     let genesis_hash = [0u8; 32];
 
     // 4. Genesis Initialization Engine Check
     match storage_engine.load_block(&genesis_hash) {
         Ok(None) => {
-            println!("[🧱 Genesis Engine] Minting Genesis Block 0...");
+            info!("[🧱 Genesis Engine] Minting Genesis Block 0...");
             let genesis_block = create_block(vec![], 0, 0, 0);
             let genesis_dag_data = ghostdag.calculate_ghostdag_data(&genesis_block, genesis_hash);
 
@@ -153,18 +158,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             block_history.push(genesis_block);
         }
         Ok(Some(genesis_blk)) => {
-            println!("[💾 Storage Engine] Resuming ledger context.");
+            info!("[💾 Storage Engine] Resuming ledger context.");
             let genesis_dag_data = ghostdag.calculate_ghostdag_data(&genesis_blk, genesis_hash);
             ghostdag.block_store.insert(genesis_hash, genesis_blk.clone());
             ghostdag.ghostdag_cache.insert(genesis_hash, genesis_dag_data);
             block_history.push(genesis_blk);
         }
-        Err(e) => eprintln!("[💾 Storage Engine Error] Initialization error: {}", e),
+        Err(e) => error!(error = %e, "[💾 Storage Engine Error] Initialization error"),
     }
 
     let miner_keys = VeloKeyPair::generate();
     let miner_address = VeloKeyPair::derive_address(&miner_keys.public_key);
-    println!("[🔒 Crypto Engine] Local Miner Live: 0x{}", encode_hex(&miner_address[0..6]));
+    info!(address = %format!("0x{}", encode_hex(&miner_address[0..6])), "[🔒 Crypto Engine] Local Miner Live");
 
     let mut node_mempool = Mempool::new();
     let mut current_tips = vec![genesis_hash];
@@ -176,7 +181,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::select! {
             _ = block_timer.tick() => {
                 block_height += 1;
-                println!("--------------------------------------------------");
 
                 simulate_transactions(&mut node_mempool);
 
@@ -188,6 +192,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 next_block.transactions = node_mempool.drain_to_batch(10);
 
                 if next_block.verify_coinbase_rewards() {
+                    // Record the target we're about to mine against *before* mining,
+                    // so any peer that later needs to validate this exact block
+                    // (orphan replay, sync catch-up) checks it against the same
+                    // target we used -- not whatever "current" has drifted to by then.
+                    difficulty_log.record(block_height, current_difficulty_target);
+
                     let pow_manager = PowManager::new(current_difficulty_target);
                     let block_hash = pow_manager.mine_block(&mut next_block);
                     let dag_data = ghostdag.calculate_ghostdag_data(&next_block, block_hash);
@@ -198,9 +208,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     if storage_engine.save_block(&block_hash, &next_block).is_ok() {
                         let _ = storage_engine.save_ghostdag_data(&block_hash, &dag_data);
-                        println!(
-                            "[⏱️ Height {:<5}] Block Mined Locally! Hash: {}... Nonce: {}",
-                            block_height, encode_hex(&block_hash[0..8]), next_block.header.nonce
+                        info!(
+                            height = block_height,
+                            hash = %encode_hex(&block_hash[0..8]),
+                            nonce = next_block.header.nonce,
+                            "[⏱️ Block Mined Locally]"
                         );
 
                         if let Ok(encoded_payload) = bincode::serialize(&next_block) {
@@ -221,6 +233,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &mut ghostdag,
                     &mut orphans,
                     &mut block_history,
+                    &mut difficulty_log,
                     current_difficulty_target,
                     genesis_hash,
                 );
@@ -264,6 +277,9 @@ fn run_explorer(storage: &BlockchainStorage, hash_str: &str) {
             target_hash.copy_from_slice(&hash_vec);
 
             if let Ok(Some(block)) = storage.load_block(&target_hash) {
+                // The explorer is a one-shot CLI report, not a running node's
+                // log stream -- plain println! output (rather than tracing's
+                // timestamped/leveled format) is the right fit here.
                 println!("\n==================================================");
                 println!("🧱 VELODAG BLOCK METADATA EXPLORER");
                 println!("==================================================");
@@ -295,14 +311,14 @@ fn decode_hex(s: &str) -> Result<Vec<u8>, std::num::ParseIntError> {
 fn load_or_create_identity(path: &str) -> Result<identity::Keypair, Box<dyn std::error::Error>> {
     if let Ok(bytes) = std::fs::read(path) {
         if let Ok(key) = identity::Keypair::from_protobuf_encoding(&bytes) {
-            println!("🔑 Loaded existing node identity from {path}");
+            info!(%path, "🔑 Loaded existing node identity");
             return Ok(key);
         }
-        eprintln!("⚠️ Found {path} but couldn't parse it -- generating a new identity.");
+        warn!(%path, "⚠️ Found identity file but couldn't parse it -- generating a new identity");
     }
     let key = identity::Keypair::generate_ed25519();
     std::fs::write(path, key.to_protobuf_encoding()?)?;
-    println!("🔑 Generated new node identity, saved to {path}");
+    info!(%path, "🔑 Generated new node identity");
     Ok(key)
 }
 
