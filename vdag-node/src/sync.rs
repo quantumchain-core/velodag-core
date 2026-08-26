@@ -16,6 +16,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use tracing::warn;
 use vdag_consensus::VeloBlock;
 
 /// Caps how many blocks we hand back in a single sync response, so a
@@ -67,7 +68,7 @@ impl OrphanPool {
         if self.current_size >= self.max_size {
             // Simple backpressure: refuse new orphans rather than growing
             // unbounded under a flood of blocks with bad/missing parents.
-            println!("⚠️ [Orphan Pool] Full ({} entries) -- dropping orphan.", self.max_size);
+            warn!(max_size = self.max_size, "Orphan pool full -- dropping orphan");
             return;
         }
         self.waiting_on.entry(missing_parent).or_default().push(block);
