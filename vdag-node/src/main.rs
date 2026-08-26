@@ -9,7 +9,7 @@ use tokio::time::interval;
 use libp2p::{
     futures::StreamExt,
     gossipsub::{IdentTopic, MessageAuthenticity, ConfigBuilder, Behaviour as GossipsubBehaviour},
-    identity, noise, tcp, yamux, SwarmBuilder,
+    identity, noise, tcp, yamux, Multiaddr, Swarm, SwarmBuilder,
 };
 
 use vdag_consensus::{
@@ -24,10 +24,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
 
     // 1. Process Explorer CLI Flags
-    if args.len() > 2 && args == "--get-block" {
-        run_explorer(&storage_engine, &args);
+    // FIX: compare args[1] (a String) to the flag, not the whole Vec.
+    if args.len() > 2 && args[1] == "--get-block" {
+        run_explorer(&storage_engine, &args[2]);
         return Ok(());
     }
+
+    // NEW: --dial <multiaddr> lets you connect node B to node A for local gossip testing.
+    // e.g. cargo run -- --dial /ip4/127.0.0.1/tcp/54321/p2p/<PeerId>
+    let dial_target: Option<String> = args
+        .iter()
+        .position(|a| a == "--dial")
+        .and_then(|i| args.get(i + 1))
+        .cloned();
 
     println!("==================================================");
     println!("🚀 Initializing VeloDAG Core Node [Ticker: VDAG] ");
@@ -38,11 +47,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let local_peer_id = libp2p::PeerId::from(local_key.public());
     println!("🆔 Local P2P Node Peer ID: {}", local_peer_id);
 
-    // Explicitly type the closure return signature to guarantee clean type resolution
-    let mut swarm = SwarmBuilder::with_existing_identity(local_key)
+    // FIX: Annotate the swarm binding explicitly as Swarm<GossipsubBehaviour>.
+    // This is what resolves libp2p 0.53's generic inference across
+    // with_tcp / with_behaviour / build() — not the closure return type alone.
+    let mut swarm: Swarm<GossipsubBehaviour> = SwarmBuilder::with_existing_identity(local_key)
         .with_tokio()
         .with_tcp(tcp::Config::default(), noise::Config::new, yamux::Config::default)?
-        .with_behaviour(|key| -> GossipsubBehaviour {
+        .with_behaviour(|key| {
             let gossipsub_config = ConfigBuilder::default().build().unwrap();
             GossipsubBehaviour::new(MessageAuthenticity::Signed(key.clone()), gossipsub_config).unwrap()
         })?
@@ -56,10 +67,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Start listening on a randomized local TCP port interface
     swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
 
+    // NEW: dial a peer if --dial was passed
+    if let Some(addr) = dial_target {
+        let remote: Multiaddr = addr.parse()?;
+        swarm.dial(remote)?;
+        println!("📡 Dialing peer at: {}", addr);
+    }
+
     // 3. Initialize Core Consensus Subsystems
-    let mut ghostdag = GhostdagManager::new(3); 
-    let difficulty_manager = DifficultyManager::new(1, 4); 
-    let mut current_difficulty_target = [0x0f; 32]; 
+    let mut ghostdag = GhostdagManager::new(3);
+    let difficulty_manager = DifficultyManager::new(1, 4);
+    let mut current_difficulty_target = [0x0f; 32];
     let mut block_history: Vec<VeloBlock> = Vec::new();
     let genesis_hash = [0u8; 32];
 
@@ -69,10 +87,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("[🧱 Genesis Engine] Minting Genesis Block 0...");
             let genesis_block = create_block(vec![], 0, 0, 0);
             let genesis_dag_data = ghostdag.calculate_ghostdag_data(&genesis_block, genesis_hash);
-            
+
             storage_engine.save_block(&genesis_hash, &genesis_block).unwrap();
             storage_engine.save_ghostdag_data(&genesis_hash, &genesis_dag_data).unwrap();
-            
+
             ghostdag.block_store.insert(genesis_hash, genesis_block.clone());
             ghostdag.ghostdag_cache.insert(genesis_hash, genesis_dag_data);
             block_history.push(genesis_block);
@@ -102,12 +120,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             _ = block_timer.tick() => {
                 block_height += 1;
                 println!("--------------------------------------------------");
-                
+
                 simulate_transactions(&mut node_mempool);
 
                 let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
                 let (miner_reward, dev_reward) = VeloBlock::calculate_subsidy_split(block_height);
-                
+
                 let mut next_block = create_block(current_tips.clone(), block_height, miner_reward, dev_reward);
                 next_block.header.timestamp = timestamp;
                 next_block.transactions = node_mempool.drain_to_batch(10);
@@ -137,7 +155,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     current_tips = vec![block_hash];
                 }
             }
-            
+
             network_event = swarm.select_next_some() => {
                 let _ = network::handle_p2p_events(network_event, &storage_engine, &mut ghostdag);
             }
@@ -160,8 +178,8 @@ fn simulate_transactions(mempool: &mut Mempool) {
     for i in 1..=3 {
         let sender_keys = VeloKeyPair::generate();
         let sender_addr = VeloKeyPair::derive_address(&sender_keys.public_key);
-        let recipient_addr = [i; 32]; 
-        let amount = (i as u64) * 500_000; 
+        let recipient_addr = [i; 32];
+        let amount = (i as u64) * 500_000;
 
         let mut payload = Vec::new();
         payload.extend_from_slice(&sender_addr);
@@ -186,7 +204,7 @@ fn run_explorer(storage: &BlockchainStorage, hash_str: &str) {
                 println!("• Height: {} | Nonce: {}", block.header.height, block.header.nonce);
                 println!("• Confirmed TXs: {}", block.transactions.len());
                 println!("• Miner Subsidy: {} | Dev Tax: {}", block.coinbase_miner_output, block.coinbase_dev_output);
-                
+
                 if let Ok(Some(dag)) = storage.load_ghostdag_data(&target_hash) {
                     println!("• GHOSTDAG Score: {}", dag.blue_score);
                     println!("• Blue Count: {} | Red Count: {}", dag.blues.len(), dag.reds.len());
@@ -203,4 +221,4 @@ fn encode_hex(bytes: &[u8]) -> String {
 
 fn decode_hex(s: &str) -> Result<Vec<u8>, std::num::ParseIntError> {
     (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16)).collect()
-}
+            }
