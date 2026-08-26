@@ -1,6 +1,8 @@
 // vdag-node/src/main.rs
 
+pub mod behaviour;
 pub mod network;
+pub mod sync;
 
 use std::env;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -8,70 +10,124 @@ use tokio::time::interval;
 
 use libp2p::{
     futures::StreamExt,
-    gossipsub::{IdentTopic, MessageAuthenticity, ConfigBuilder, Behaviour as GossipsubBehaviour},
-    identity, noise, tcp, yamux, Multiaddr, Swarm, SwarmBuilder,
+    gossipsub::{self, IdentTopic},
+    identity, mdns, noise, request_response, swarm::StreamProtocol, tcp, yamux, Multiaddr, Swarm,
+    SwarmBuilder,
 };
 
 use vdag_consensus::{
-    VeloBlock, BlockHeader, Mempool, Transaction, BlockchainStorage,
-    ghostdag::GhostdagManager, pow::PowManager, daa::DifficultyManager
+    daa::DifficultyManager, ghostdag::GhostdagManager, pow::PowManager, BlockHeader,
+    BlockchainStorage, Mempool, Transaction, VeloBlock,
 };
 use vdag_crypto::VeloKeyPair;
 
+use behaviour::{SyncBehaviour, VeloBehaviour};
+use network::GOSSIP_TOPIC;
+use sync::OrphanPool;
+
+const IDENTITY_KEY_PATH: &str = "node_identity.key";
+const BOOTSTRAP_FILE_PATH: &str = "bootstrap_peers.txt";
+const ORPHAN_POOL_MAX: usize = 1024;
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Structured logging is initialized here; existing println! call sites
+    // throughout this file/network.rs still work as before and can be
+    // migrated to tracing::info!/warn! incrementally.
+    tracing_subscriber::fmt::init();
+
     let storage_engine = BlockchainStorage::open();
     let args: Vec<String> = env::args().collect();
 
     // 1. Process Explorer CLI Flags
-    // FIX: compare args[1] (a String) to the flag, not the whole Vec.
     if args.len() > 2 && args[1] == "--get-block" {
         run_explorer(&storage_engine, &args[2]);
         return Ok(());
     }
 
-    // NEW: --dial <multiaddr> lets you connect node B to node A for local gossip testing.
-    // e.g. cargo run -- --dial /ip4/127.0.0.1/tcp/54321/p2p/<PeerId>
-    let dial_target: Option<String> = args
+    // --dial <multiaddr> may be passed multiple times.
+    let cli_dial_targets: Vec<String> = args
         .iter()
-        .position(|a| a == "--dial")
-        .and_then(|i| args.get(i + 1))
-        .cloned();
+        .enumerate()
+        .filter(|(_, a)| *a == "--dial")
+        .filter_map(|(i, _)| args.get(i + 1).cloned())
+        .collect();
 
     println!("==================================================");
     println!("🚀 Initializing VeloDAG Core Node [Ticker: VDAG] ");
     println!("==================================================");
 
-    // 2. Initialize libp2p P2P Network Component Protocols
-    let local_key = identity::Keypair::generate_ed25519();
+    // 2. Node identity: persisted across restarts so Peer ID stays stable
+    // (bootstrap lists / --dial targets otherwise go stale every run).
+    let local_key = load_or_create_identity(IDENTITY_KEY_PATH)?;
     let local_peer_id = libp2p::PeerId::from(local_key.public());
     println!("🆔 Local P2P Node Peer ID: {}", local_peer_id);
 
-    // FIX: Annotate the swarm binding explicitly as Swarm<GossipsubBehaviour>.
-    // This is what resolves libp2p 0.53's generic inference across
-    // with_tcp / with_behaviour / build() — not the closure return type alone.
-    let mut swarm: Swarm<GossipsubBehaviour> = SwarmBuilder::with_existing_identity(local_key)
+    let mut swarm: Swarm<VeloBehaviour> = SwarmBuilder::with_existing_identity(local_key)
         .with_tokio()
         .with_tcp(tcp::Config::default(), noise::Config::new, yamux::Config::default)?
         .with_behaviour(|key| {
-            let gossipsub_config = ConfigBuilder::default().build().unwrap();
-            GossipsubBehaviour::new(MessageAuthenticity::Signed(key.clone()), gossipsub_config).unwrap()
+            // Gossipsub tuned for a small testnet mesh rather than the
+            // mainnet-scale defaults, plus a hard cap on message size so a
+            // peer can't force us to buffer huge payloads.
+            let gossipsub_config = gossipsub::ConfigBuilder::default()
+                .max_transmit_size(2 * 1024 * 1024) // 2 MB cap per block+txs payload
+                .mesh_n_low(1)
+                .mesh_n(4)
+                .mesh_n_high(8)
+                .validation_mode(gossipsub::ValidationMode::Strict)
+                .build()
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+
+            let mut gossipsub = gossipsub::Behaviour::new(
+                gossipsub::MessageAuthenticity::Signed(key.clone()),
+                gossipsub_config,
+            )
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+
+            // Basic peer scoring: peers sending invalid/duplicate/spammy
+            // gossip get penalized and eventually graylisted automatically.
+            gossipsub
+                .with_peer_score(
+                    gossipsub::PeerScoreParams::default(),
+                    gossipsub::PeerScoreThresholds::default(),
+                )
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+
+            let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), key.public().to_peer_id())?;
+
+            let sync: SyncBehaviour = request_response::json::Behaviour::new(
+                [(StreamProtocol::new("/velodag/sync/1"), request_response::ProtocolSupport::Full)],
+                request_response::Config::default(),
+            );
+
+            Ok(VeloBehaviour { gossipsub, mdns, sync })
         })?
         .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
         .build();
 
     // Subscribe to global block propagation lanes
-    let block_topic = IdentTopic::new("vdag-blocks");
-    swarm.behaviour_mut().subscribe(&block_topic)?;
+    let block_topic = IdentTopic::new(GOSSIP_TOPIC);
+    swarm.behaviour_mut().gossipsub.subscribe(&block_topic)?;
 
     // Start listening on a randomized local TCP port interface
     swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
 
-    // NEW: dial a peer if --dial was passed
-    if let Some(addr) = dial_target {
-        let remote: Multiaddr = addr.parse()?;
-        swarm.dial(remote)?;
-        println!("📡 Dialing peer at: {}", addr);
+    // Dial explicit --dial targets plus anything in bootstrap_peers.txt
+    // (one multiaddr per line, '#' comments allowed).
+    let mut dial_targets = cli_dial_targets;
+    dial_targets.extend(load_bootstrap_peers(BOOTSTRAP_FILE_PATH));
+    for addr_str in dial_targets {
+        match addr_str.parse::<Multiaddr>() {
+            Ok(remote) => {
+                if let Err(e) = swarm.dial(remote) {
+                    eprintln!("⚠️ Failed to dial {addr_str}: {e}");
+                } else {
+                    println!("📡 Dialing peer at: {addr_str}");
+                }
+            }
+            Err(e) => eprintln!("⚠️ Skipping invalid bootstrap/dial address '{addr_str}': {e}"),
+        }
     }
 
     // 3. Initialize Core Consensus Subsystems
@@ -79,6 +135,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let difficulty_manager = DifficultyManager::new(1, 4);
     let mut current_difficulty_target = [0x0f; 32];
     let mut block_history: Vec<VeloBlock> = Vec::new();
+    let mut orphans = OrphanPool::new(ORPHAN_POOL_MAX);
     let genesis_hash = [0u8; 32];
 
     // 4. Genesis Initialization Engine Check
@@ -147,7 +204,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         );
 
                         if let Ok(encoded_payload) = bincode::serialize(&next_block) {
-                            let _ = swarm.behaviour_mut().publish(block_topic.clone(), encoded_payload);
+                            let _ = swarm.behaviour_mut().gossipsub.publish(block_topic.clone(), encoded_payload);
                         }
                     }
 
@@ -157,7 +214,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             network_event = swarm.select_next_some() => {
-                let _ = network::handle_p2p_events(network_event, &storage_engine, &mut ghostdag);
+                let _ = network::handle_p2p_events(
+                    network_event,
+                    &mut swarm,
+                    &storage_engine,
+                    &mut ghostdag,
+                    &mut orphans,
+                    &mut block_history,
+                    current_difficulty_target,
+                    genesis_hash,
+                );
             }
         }
     }
@@ -221,4 +287,36 @@ fn encode_hex(bytes: &[u8]) -> String {
 
 fn decode_hex(s: &str) -> Result<Vec<u8>, std::num::ParseIntError> {
     (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16)).collect()
-            }
+}
+
+/// Loads a persisted node identity from disk, or generates and saves a new
+/// one. Keeps Peer ID stable across restarts so bootstrap lists and
+/// --dial targets don't go stale every run.
+fn load_or_create_identity(path: &str) -> Result<identity::Keypair, Box<dyn std::error::Error>> {
+    if let Ok(bytes) = std::fs::read(path) {
+        if let Ok(key) = identity::Keypair::from_protobuf_encoding(&bytes) {
+            println!("🔑 Loaded existing node identity from {path}");
+            return Ok(key);
+        }
+        eprintln!("⚠️ Found {path} but couldn't parse it -- generating a new identity.");
+    }
+    let key = identity::Keypair::generate_ed25519();
+    std::fs::write(path, key.to_protobuf_encoding()?)?;
+    println!("🔑 Generated new node identity, saved to {path}");
+    Ok(key)
+}
+
+/// Reads a plain-text bootstrap peer list, one multiaddr per line.
+/// Blank lines and lines starting with '#' are ignored. Missing file is
+/// not an error -- it just means "no bootstrap peers configured".
+fn load_bootstrap_peers(path: &str) -> Vec<String> {
+    std::fs::read_to_string(path)
+        .map(|content| {
+            content
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                .collect()
+        })
+        .unwrap_or_default()
+}
