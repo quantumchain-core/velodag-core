@@ -46,6 +46,12 @@ This tracker describes the current repository state. A feature is marked done on
 - [x] `mempool_size` exposes the current pending transaction count.
 - [x] Live RPC intake has been tested against the release binary.
 
+### Wallet tooling
+
+- [x] Wallet creation and address derivation CLI commands exist.
+- [x] Wallet CLI signs the canonical transfer payload.
+- [x] Wallet CLI can submit signed transfers to the local RPC.
+
 ### Local networking and operations
 
 - [x] Noise and Yamux encrypted libp2p transport is configured.
@@ -76,7 +82,8 @@ This tracker describes the current repository state. A feature is marked done on
 - [ ] Persist and validate state transitions atomically with block commits.
 - [ ] Add state migration/versioning for database upgrades.
 - [ ] Reconcile alternate DAG branches instead of applying every accepted block to one linear balance state.
-- [ ] Add wallet transaction creation and secure key backup/recovery.
+- [x] Add wallet transaction creation CLI.
+- [ ] Add encrypted key storage, secure backup/recovery, and hardware-wallet support.
 
 ### Networking security
 

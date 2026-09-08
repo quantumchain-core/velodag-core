@@ -4,6 +4,7 @@ use pqcrypto_dilithium::dilithium2::{
 // Explicitly import signature traits to expose .as_bytes() and .from_bytes()
 use pqcrypto_traits::sign::{
     DetachedSignature as DetachedSignatureTrait, PublicKey as PublicKeyTrait,
+    SecretKey as SecretKeyTrait,
 };
 use sha3::{Digest, Sha3_256};
 
@@ -37,6 +38,19 @@ impl VeloKeyPair {
     /// Returns the public key in its canonical serialized form for transactions.
     pub fn public_key_bytes(&self) -> Vec<u8> {
         self.public_key.as_bytes().to_vec()
+    }
+
+    pub fn secret_key_bytes(&self) -> Vec<u8> {
+        self.secret_key.as_bytes().to_vec()
+    }
+
+    pub fn from_bytes(public_key: &[u8], secret_key: &[u8]) -> Result<Self, String> {
+        let public_key = PublicKey::from_bytes(public_key).map_err(|e| e.to_string())?;
+        let secret_key = SecretKey::from_bytes(secret_key).map_err(|e| e.to_string())?;
+        Ok(Self {
+            public_key,
+            secret_key,
+        })
     }
 }
 

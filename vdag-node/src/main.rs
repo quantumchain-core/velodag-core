@@ -5,6 +5,7 @@ pub mod difficulty_log;
 pub mod network;
 pub mod rpc;
 pub mod sync;
+pub mod wallet;
 
 use std::env;
 use std::sync::Arc;
@@ -40,8 +41,13 @@ const ORPHAN_POOL_MAX: usize = 1024;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
 
-    let storage_engine = BlockchainStorage::open();
     let args: Vec<String> = env::args().collect();
+
+    if args.get(1).map(String::as_str) == Some("wallet") {
+        return handle_wallet_command(&args[2..]).await;
+    }
+
+    let storage_engine = BlockchainStorage::open();
 
     // 1. Process Explorer CLI Flags
     if args.len() > 2 && args[1] == "--get-block" {
@@ -344,6 +350,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
             }
         }
+    }
+}
+
+async fn handle_wallet_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    match args {
+        [command, path] if command == "create" => wallet::create(path),
+        [command, path] if command == "address" => wallet::address(path),
+        [command, path, recipient, amount] if command == "sign-transfer" => {
+            wallet::sign_transfer(path, recipient, amount.parse()?)
+        }
+        [command, path, recipient, amount, rpc_address] if command == "submit" => {
+            wallet::submit(path, recipient, amount.parse()?, rpc_address).await
+        }
+        _ => Err("usage: wallet create|address|sign-transfer|submit ...".into()),
     }
 }
 

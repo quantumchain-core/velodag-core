@@ -114,6 +114,32 @@ This is the first local transaction intake interface. A public deployment still
 needs authenticated remote RPC, fees, replay protection, wallet tooling, and
 rate limits.
 
+### Wallet CLI
+
+The release binary can create a local Dilithium wallet and sign the exact
+transaction format accepted by the RPC:
+
+```bash
+./target/release/vdag-node wallet create "$HOME/vdag-wallet.json"
+./target/release/vdag-node wallet address "$HOME/vdag-wallet.json"
+./target/release/vdag-node wallet sign-transfer \
+  "$HOME/vdag-wallet.json" \
+  0x0202020202020202020202020202020202020202020202020202020202020202 1
+```
+
+To sign and submit in one command to a local node:
+
+```bash
+./target/release/vdag-node wallet submit \
+  "$HOME/vdag-wallet.json" \
+  0x0202020202020202020202020202020202020202020202020202020202020202 1 \
+  127.0.0.1:8545
+```
+
+Wallet files contain private Dilithium key material. Protect them with file
+permissions and encrypted backups; this CLI does not yet provide password-based
+encryption or hardware-wallet protection.
+
 ## Public Access with ngrok
 
 This Codespace runs Alpine Linux, so do not use the Debian `apt` ngrok
