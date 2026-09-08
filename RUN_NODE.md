@@ -124,6 +124,7 @@ environment, never as a command-line argument:
 export VDAG_WALLET_PASSWORD='use-a-secret-from-your-password-manager'
 ./target/release/vdag-node wallet create "$HOME/vdag-wallet.json"
 ./target/release/vdag-node wallet address "$HOME/vdag-wallet.json"
+./target/release/vdag-node wallet verify "$HOME/vdag-wallet.json"
 ./target/release/vdag-node wallet sign-transfer \
   "$HOME/vdag-wallet.json" \
   0x0202020202020202020202020202020202020202020202020202020202020202 1
@@ -143,6 +144,25 @@ permissions and encrypted backups. The wallet file uses Argon2 key derivation
 and ChaCha20-Poly1305 authenticated encryption. This CLI does not yet provide
 hardware-wallet protection or password recovery; losing the passphrase loses
 access to the wallet.
+
+Verify and back up an encrypted wallet without exposing its secret:
+
+```bash
+./target/release/vdag-node wallet verify "$HOME/vdag-wallet.json"
+./target/release/vdag-node wallet backup \
+  "$HOME/vdag-wallet.json" "$HOME/vdag-wallet.backup.json"
+```
+
+Restore only to a new destination, then verify it:
+
+```bash
+./target/release/vdag-node wallet restore \
+  "$HOME/vdag-wallet.backup.json" "$HOME/vdag-wallet-restored.json"
+./target/release/vdag-node wallet verify "$HOME/vdag-wallet-restored.json"
+```
+
+Store the backup on encrypted offline storage. The password is not stored in
+the wallet file and cannot be recovered by the node.
 
 ## Public Access with ngrok
 

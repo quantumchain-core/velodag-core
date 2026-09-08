@@ -56,6 +56,36 @@ pub fn address(path: &str) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+pub fn verify(path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let keys = load(path)?;
+    let address = VeloKeyPair::derive_address(&keys.public_key);
+    println!("wallet valid address=0x{}", hex::encode(address));
+    Ok(())
+}
+
+pub fn backup(source: &str, destination: &str) -> Result<(), Box<dyn std::error::Error>> {
+    load(source)?;
+    if Path::new(destination).exists() {
+        return Err(format!("backup destination already exists: {destination}").into());
+    }
+    std::fs::copy(source, destination)?;
+    set_private_permissions(destination)?;
+    println!("encrypted wallet backup written to {destination}");
+    Ok(())
+}
+
+pub fn restore(backup: &str, destination: &str) -> Result<(), Box<dyn std::error::Error>> {
+    load(backup)?;
+    if Path::new(destination).exists() {
+        return Err(format!("restore destination already exists: {destination}").into());
+    }
+    std::fs::copy(backup, destination)?;
+    set_private_permissions(destination)?;
+    load(destination)?;
+    println!("wallet restored to {destination}");
+    Ok(())
+}
+
 pub fn sign_transfer(
     path: &str,
     recipient: &str,
