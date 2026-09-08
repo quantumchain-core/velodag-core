@@ -90,6 +90,7 @@ pub fn sign_transfer(
     path: &str,
     recipient: &str,
     amount: u64,
+    nonce: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let keys = load(path)?;
     let sender = VeloKeyPair::derive_address(&keys.public_key);
@@ -98,6 +99,7 @@ pub fn sign_transfer(
         sender,
         recipient,
         amount,
+        nonce,
         public_key: keys.public_key_bytes(),
         signature: Vec::new(),
     };
@@ -115,6 +117,7 @@ pub async fn submit(
     path: &str,
     recipient: &str,
     amount: u64,
+    nonce: u64,
     rpc_address: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let keys = load(path)?;
@@ -124,6 +127,7 @@ pub async fn submit(
         sender,
         recipient,
         amount,
+        nonce,
         public_key: keys.public_key_bytes(),
         signature: Vec::new(),
     };
@@ -141,6 +145,7 @@ pub async fn submit(
             "sender": hex::encode(transaction.sender),
             "recipient": hex::encode(transaction.recipient),
             "amount": transaction.amount,
+            "nonce": transaction.nonce,
             "public_key": hex::encode(&transaction.public_key),
             "signature": hex::encode(&transaction.signature)
         }

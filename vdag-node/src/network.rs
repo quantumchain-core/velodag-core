@@ -218,6 +218,7 @@ fn validate_and_ingest(
             &tx.sender,
             &tx.recipient,
             tx.amount,
+            tx.nonce,
             &tx.public_key,
             &tx.signature,
         )

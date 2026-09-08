@@ -364,11 +364,18 @@ async fn handle_wallet_command(args: &[String]) -> Result<(), Box<dyn std::error
         [command, backup, destination] if command == "restore" => {
             wallet::restore(backup, destination)
         }
-        [command, path, recipient, amount] if command == "sign-transfer" => {
-            wallet::sign_transfer(path, recipient, amount.parse()?)
+        [command, path, recipient, amount, nonce] if command == "sign-transfer" => {
+            wallet::sign_transfer(path, recipient, amount.parse()?, nonce.parse()?)
         }
-        [command, path, recipient, amount, rpc_address] if command == "submit" => {
-            wallet::submit(path, recipient, amount.parse()?, rpc_address).await
+        [command, path, recipient, amount, nonce, rpc_address] if command == "submit" => {
+            wallet::submit(
+                path,
+                recipient,
+                amount.parse()?,
+                nonce.parse()?,
+                rpc_address,
+            )
+            .await
         }
         _ => Err(
             "usage: wallet create|address|verify|backup|restore|sign-transfer|submit ...".into(),

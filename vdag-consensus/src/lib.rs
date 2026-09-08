@@ -28,6 +28,7 @@ pub struct Transaction {
     pub sender: [u8; 32],
     pub recipient: [u8; 32],
     pub amount: u64,
+    pub nonce: u64,
     pub public_key: Vec<u8>,
     pub signature: Vec<u8>,
 }
@@ -45,10 +46,11 @@ pub struct VeloBlock {
 impl VeloBlock {
     /// Returns the canonical bytes signed by a transaction sender.
     pub fn transaction_payload(tx: &Transaction) -> Vec<u8> {
-        let mut payload = Vec::with_capacity(32 + 32 + 8);
+        let mut payload = Vec::with_capacity(32 + 32 + 8 + 8);
         payload.extend_from_slice(&tx.sender);
         payload.extend_from_slice(&tx.recipient);
         payload.extend_from_slice(&tx.amount.to_le_bytes());
+        payload.extend_from_slice(&tx.nonce.to_le_bytes());
         payload
     }
 
@@ -137,6 +139,7 @@ impl VeloBlock {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LedgerState {
     balances: HashMap<[u8; 32], u64>,
+    next_nonces: HashMap<[u8; 32], u64>,
     confirmed_transactions: HashSet<[u8; 32]>,
 }
 
@@ -148,6 +151,7 @@ impl LedgerState {
     /// Atomically validates and applies a block's transfers and coinbase outputs.
     pub fn apply_block(&mut self, block: &VeloBlock) -> Result<(), String> {
         let mut balances = self.balances.clone();
+        let mut next_nonces = self.next_nonces.clone();
         let mut confirmed_transactions = self.confirmed_transactions.clone();
 
         if block.header.height == 0 {
@@ -180,6 +184,14 @@ impl LedgerState {
                 return Err("transaction amount must be positive".into());
             }
 
+            let expected_nonce = next_nonces.get(&tx.sender).copied().unwrap_or(0);
+            if tx.nonce != expected_nonce {
+                return Err(format!(
+                    "invalid nonce: expected {expected_nonce}, received {}",
+                    tx.nonce
+                ));
+            }
+
             let sender_balance = balances.get(&tx.sender).copied().unwrap_or(0);
             let remaining = sender_balance
                 .checked_sub(tx.amount)
@@ -192,6 +204,7 @@ impl LedgerState {
                     .checked_add(tx.amount)
                     .ok_or_else(|| "recipient balance overflow".to_string())?,
             );
+            next_nonces.insert(tx.sender, expected_nonce + 1);
         }
 
         let miner_balance = balances
@@ -217,6 +230,7 @@ impl LedgerState {
         );
 
         self.balances = balances;
+        self.next_nonces = next_nonces;
         self.confirmed_transactions = confirmed_transactions;
         Ok(())
     }
@@ -402,6 +416,7 @@ mod consensus_tests {
             sender: [1u8; 32],
             recipient: [2u8; 32],
             amount: 10,
+            nonce: 0,
             public_key: vec![3u8; 4],
             signature: vec![4u8; 4],
         };
@@ -409,6 +424,7 @@ mod consensus_tests {
             sender: [5u8; 32],
             recipient: [6u8; 32],
             amount: 20,
+            nonce: 0,
             public_key: vec![7u8; 4],
             signature: vec![8u8; 4],
         };
@@ -457,6 +473,7 @@ mod consensus_tests {
             sender: miner,
             recipient,
             amount: miner_reward,
+            nonce: 0,
             public_key: vec![],
             signature: vec![],
         };
@@ -480,5 +497,14 @@ mod consensus_tests {
         assert_eq!(state.balance(&miner), next_miner_reward);
         assert_eq!(state.balance(&recipient), miner_reward);
         assert!(state.apply_block(&spend_block).is_err());
+
+        let mut wrong_nonce_block = spend_block.clone();
+        wrong_nonce_block.transactions[0].recipient = [3u8; 32];
+        wrong_nonce_block.header.tx_merkle_root =
+            VeloBlock::transaction_merkle_root(&wrong_nonce_block.transactions);
+        assert!(state
+            .apply_block(&wrong_nonce_block)
+            .unwrap_err()
+            .contains("invalid nonce"));
     }
 }

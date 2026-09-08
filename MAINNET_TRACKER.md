@@ -80,7 +80,7 @@ This tracker describes the current repository state. A feature is marked done on
 ### State and transaction model
 
 - [ ] Replace the local-only RPC with a versioned, authenticated production API.
-- [ ] Add transaction nonces or another replay-protection mechanism.
+- [x] Add transaction nonces and enforce sequential sender nonces.
 - [ ] Define whether the ledger is account-based or UTXO-based and freeze the specification.
 - [ ] Persist and validate state transitions atomically with block commits.
 - [ ] Add state migration/versioning for database upgrades.

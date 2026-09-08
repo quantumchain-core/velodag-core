@@ -20,6 +20,7 @@ struct SubmitTransactionParams {
     sender: String,
     recipient: String,
     amount: u64,
+    nonce: u64,
     public_key: String,
     signature: String,
 }
@@ -113,6 +114,7 @@ fn build_transaction(params: SubmitTransactionParams) -> Result<Transaction, Str
         &sender,
         &recipient,
         params.amount,
+        params.nonce,
         &public_key,
         &signature,
     ) {
@@ -123,6 +125,7 @@ fn build_transaction(params: SubmitTransactionParams) -> Result<Transaction, Str
         sender,
         recipient,
         amount: params.amount,
+        nonce: params.nonce,
         public_key,
         signature,
     })
@@ -157,6 +160,7 @@ mod tests {
             sender,
             recipient,
             amount: 1,
+            nonce: 0,
             public_key: keys.public_key_bytes(),
             signature: Vec::new(),
         };
@@ -169,6 +173,7 @@ mod tests {
             sender: hex::encode(sender),
             recipient: hex::encode(recipient),
             amount: 1,
+            nonce: 0,
             public_key: hex::encode(&transaction.public_key),
             signature: hex::encode(signature),
         };
@@ -183,6 +188,7 @@ mod tests {
             sender: hex::encode([1u8; 32]),
             recipient: hex::encode([2u8; 32]),
             amount: 1,
+            nonce: 0,
             public_key: hex::encode(keys.public_key_bytes()),
             signature: hex::encode(vdag_crypto::sign_message(
                 b"wrong payload",

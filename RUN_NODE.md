@@ -96,7 +96,7 @@ security.
 Submit a signed transaction with one JSON request per line:
 
 ```bash
-printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"submit_transaction","params":{"sender":"<64-hex-address>","recipient":"<64-hex-address>","amount":1,"public_key":"<public-key-hex>","signature":"<signature-hex>"}}' | nc 127.0.0.1 8545
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"submit_transaction","params":{"sender":"<64-hex-address>","recipient":"<64-hex-address>","amount":1,"nonce":0,"public_key":"<public-key-hex>","signature":"<signature-hex>"}}' | nc 127.0.0.1 8545
 ```
 
 The node verifies the public-key ownership, signature, positive amount, and
@@ -127,7 +127,7 @@ export VDAG_WALLET_PASSWORD='use-a-secret-from-your-password-manager'
 ./target/release/vdag-node wallet verify "$HOME/vdag-wallet.json"
 ./target/release/vdag-node wallet sign-transfer \
   "$HOME/vdag-wallet.json" \
-  0x0202020202020202020202020202020202020202020202020202020202020202 1
+  0x0202020202020202020202020202020202020202020202020202020202020202 1 0
 ```
 
 To sign and submit in one command to a local node:
@@ -135,7 +135,7 @@ To sign and submit in one command to a local node:
 ```bash
 ./target/release/vdag-node wallet submit \
   "$HOME/vdag-wallet.json" \
-  0x0202020202020202020202020202020202020202020202020202020202020202 1 \
+  0x0202020202020202020202020202020202020202020202020202020202020202 1 0 \
   127.0.0.1:8545
 ```
 

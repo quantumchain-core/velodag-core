@@ -74,6 +74,7 @@ pub fn verify_transaction_signature(
     sender: &[u8; 32],
     recipient: &[u8; 32],
     amount: u64,
+    nonce: u64,
     public_key_bytes: &[u8],
     signature_bytes: &[u8],
 ) -> bool {
@@ -86,10 +87,11 @@ pub fn verify_transaction_signature(
         return false;
     }
 
-    let mut payload = Vec::with_capacity(32 + 32 + 8);
+    let mut payload = Vec::with_capacity(32 + 32 + 8 + 8);
     payload.extend_from_slice(sender);
     payload.extend_from_slice(recipient);
     payload.extend_from_slice(&amount.to_le_bytes());
+    payload.extend_from_slice(&nonce.to_le_bytes());
     verify_signature(&payload, signature_bytes, &public_key)
 }
 
