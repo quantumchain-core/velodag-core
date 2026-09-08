@@ -238,7 +238,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut node_mempool = Mempool::new();
     let mut current_tips = block_history
         .last()
-        .map(|block| vec![block.calculate_hash()])
+        .map(|block| {
+            if block.header.height == 0 {
+                vec![genesis_hash]
+            } else {
+                vec![block.calculate_hash()]
+            }
+        })
         .unwrap_or_else(|| vec![genesis_hash]);
     let mut block_height = block_history
         .iter()
@@ -250,7 +256,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let mut sync_pending = false;
     let mut block_timer = interval_at(
-        Instant::now() + Duration::from_secs(1),
+        Instant::now() + Duration::from_secs(2),
         Duration::from_secs(1),
     );
 
