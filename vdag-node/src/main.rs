@@ -157,6 +157,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // whatever "current" happens to be by the time they're processed.
     let mut difficulty_log = DifficultyLog::new();
     let genesis_hash = [0u8; 32];
+    let persisted_ledger_state = match storage_engine.load_ledger_state() {
+        Ok(state) => state,
+        Err(e) => {
+            error!(error = %e, "Failed to load persisted ledger state; replaying blocks");
+            None
+        }
+    };
 
     // 4. Genesis Initialization Engine Check
     match storage_engine.load_block(&genesis_hash) {
@@ -172,6 +179,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             storage_engine
                 .save_ghostdag_data(&genesis_hash, &genesis_dag_data)
                 .unwrap();
+            storage_engine.save_ledger_state(&ledger_state).unwrap();
 
             ghostdag
                 .block_store
@@ -183,6 +191,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Ok(Some(genesis_blk)) => {
             info!("[💾 Storage Engine] Resuming ledger context.");
+            if persisted_ledger_state.is_none() {
+                ledger_state.apply_block(&genesis_blk).unwrap();
+            }
             let genesis_dag_data = ghostdag.calculate_ghostdag_data(&genesis_blk, genesis_hash);
             ghostdag
                 .block_store
@@ -191,6 +202,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .ghostdag_cache
                 .insert(genesis_hash, genesis_dag_data);
             block_history.push(genesis_blk);
+
+            match storage_engine.load_all_blocks() {
+                Ok(stored_blocks) => {
+                    for block in stored_blocks {
+                        if block.header.height == 0 {
+                            continue;
+                        }
+                        if persisted_ledger_state.is_none() {
+                            ledger_state.apply_block(&block).unwrap();
+                        }
+                        let block_hash = block.calculate_hash();
+                        let dag_data = ghostdag.calculate_ghostdag_data(&block, block_hash);
+                        ghostdag.block_store.insert(block_hash, block.clone());
+                        ghostdag.ghostdag_cache.insert(block_hash, dag_data);
+                        block_history.push(block);
+                    }
+                }
+                Err(e) => error!(error = %e, "Failed to replay stored blocks"),
+            }
+
+            if let Some(state) = persisted_ledger_state {
+                ledger_state = state;
+            } else {
+                storage_engine.save_ledger_state(&ledger_state).unwrap();
+            }
         }
         Err(e) => error!(error = %e, "[💾 Storage Engine Error] Initialization error"),
     }
@@ -200,8 +236,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!(address = %format!("0x{}", encode_hex(&miner_address[0..6])), "[🔒 Crypto Engine] Local Miner Live");
 
     let mut node_mempool = Mempool::new();
-    let mut current_tips = vec![genesis_hash];
-    let mut block_height = 0;
+    let mut current_tips = block_history
+        .last()
+        .map(|block| vec![block.calculate_hash()])
+        .unwrap_or_else(|| vec![genesis_hash]);
+    let mut block_height = block_history
+        .iter()
+        .map(|block| block.header.height)
+        .max()
+        .unwrap_or(0);
+    if let Some(last_block) = block_history.last() {
+        current_difficulty_target = last_block.header.difficulty_target;
+    }
     let mut sync_pending = false;
     let mut block_timer = interval_at(
         Instant::now() + Duration::from_secs(1),
@@ -233,6 +279,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if next_block.verify_coinbase_rewards() {
                     if let Err(reason) = ledger_state.apply_block(&next_block) {
                         warn!(height = block_height, %reason, "Local block rejected by ledger state");
+                        continue;
+                    }
+                    if let Err(reason) = storage_engine.save_ledger_state(&ledger_state) {
+                        warn!(height = block_height, %reason, "Failed to persist ledger state");
                         continue;
                     }
                     // Record the target we're about to mine against *before* mining,

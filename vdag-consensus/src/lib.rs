@@ -134,7 +134,7 @@ impl VeloBlock {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LedgerState {
     balances: HashMap<[u8; 32], u64>,
     confirmed_transactions: HashSet<[u8; 32]>,
@@ -274,6 +274,7 @@ impl Default for Mempool {
 pub struct BlockchainStorage {
     blocks_tree: sled::Tree,
     ghostdag_tree: sled::Tree,
+    ledger_tree: sled::Tree,
     db: sled::Db,
 }
 
@@ -290,10 +291,14 @@ impl BlockchainStorage {
         let ghostdag_tree = db
             .open_tree(b"ghostdag")
             .expect("Failed to open ghostdag metadata tree");
+        let ledger_tree = db
+            .open_tree(b"ledger")
+            .expect("Failed to open ledger state tree");
 
         BlockchainStorage {
             blocks_tree,
             ghostdag_tree,
+            ledger_tree,
             db,
         }
     }
@@ -318,6 +323,32 @@ impl BlockchainStorage {
         if let Some(bytes) = self.blocks_tree.get(block_hash)? {
             let block: VeloBlock = bincode::deserialize(&bytes)?;
             Ok(Some(block))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Loads every persisted block for startup recovery, ordered by height.
+    pub fn load_all_blocks(&self) -> Result<Vec<VeloBlock>, Box<dyn std::error::Error>> {
+        let mut blocks = Vec::new();
+        for entry in self.blocks_tree.iter() {
+            let (_, bytes) = entry?;
+            blocks.push(bincode::deserialize(&bytes)?);
+        }
+        blocks.sort_by_key(|block: &VeloBlock| block.header.height);
+        Ok(blocks)
+    }
+
+    pub fn save_ledger_state(&self, state: &LedgerState) -> Result<(), Box<dyn std::error::Error>> {
+        let serialized_bytes = bincode::serialize(state)?;
+        self.ledger_tree.insert(b"current", serialized_bytes)?;
+        self.db.flush()?;
+        Ok(())
+    }
+
+    pub fn load_ledger_state(&self) -> Result<Option<LedgerState>, Box<dyn std::error::Error>> {
+        if let Some(bytes) = self.ledger_tree.get(b"current")? {
+            Ok(Some(bincode::deserialize(&bytes)?))
         } else {
             Ok(None)
         }

@@ -264,6 +264,10 @@ fn validate_and_ingest(
         warn!(height = block.header.height, %reason, "Rejected block: invalid ledger state");
         return Ok(());
     }
+    if let Err(reason) = storage.save_ledger_state(ledger_state) {
+        warn!(height = block.header.height, %reason, "Rejected block: could not persist ledger state");
+        return Ok(());
+    }
 
     let ingested_hash = ingest_block_only(block, storage, ghostdag, block_history)?;
 
