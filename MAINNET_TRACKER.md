@@ -39,6 +39,13 @@ This tracker describes the current repository state. A feature is marked done on
 - [x] Ledger snapshots are persisted in sled.
 - [x] Nodes restore ledger state, block height, tip, and identity after restart.
 
+### Transaction intake
+
+- [x] Loopback JSON-RPC server accepts newline-delimited requests.
+- [x] `submit_transaction` validates signed transactions before mempool insertion.
+- [x] `mempool_size` exposes the current pending transaction count.
+- [x] Live RPC intake has been tested against the release binary.
+
 ### Local networking and operations
 
 - [x] Noise and Yamux encrypted libp2p transport is configured.
@@ -63,7 +70,7 @@ This tracker describes the current repository state. A feature is marked done on
 
 ### State and transaction model
 
-- [ ] Add a real transaction submission interface through RPC or CLI.
+- [ ] Replace the local-only RPC with a versioned, authenticated production API.
 - [ ] Add transaction nonces or another replay-protection mechanism.
 - [ ] Define whether the ledger is account-based or UTXO-based and freeze the specification.
 - [ ] Persist and validate state transitions atomically with block commits.
@@ -114,7 +121,8 @@ All of the following must be complete before a mainnet announcement:
 ## Immediate next work
 
 1. Freeze and implement the genesis/network identity specification.
-2. Add a versioned transaction RPC and wallet-compatible transaction flow.
+2. Add a wallet-compatible transaction creation and signing flow.
 3. Make state transitions atomic and DAG-aware.
-4. Add adversarial consensus and network tests.
-5. Run a long-lived public testnet before any mainnet decision.
+4. Add transaction status, confirmation queries, and RPC authentication.
+5. Add adversarial consensus and network tests.
+6. Run a long-lived public testnet before any mainnet decision.
