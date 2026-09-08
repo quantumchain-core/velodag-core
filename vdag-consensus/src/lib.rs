@@ -27,6 +27,7 @@ pub struct Transaction {
     pub sender: [u8; 32],
     pub recipient: [u8; 32],
     pub amount: u64,
+    pub public_key: Vec<u8>,
     pub signature: Vec<u8>,
 }
 
@@ -39,6 +40,55 @@ pub struct VeloBlock {
 }
 
 impl VeloBlock {
+    /// Returns the canonical bytes signed by a transaction sender.
+    pub fn transaction_payload(tx: &Transaction) -> Vec<u8> {
+        let mut payload = Vec::with_capacity(32 + 32 + 8);
+        payload.extend_from_slice(&tx.sender);
+        payload.extend_from_slice(&tx.recipient);
+        payload.extend_from_slice(&tx.amount.to_le_bytes());
+        payload
+    }
+
+    /// Computes a deterministic transaction commitment for the block header.
+    pub fn transaction_merkle_root(transactions: &[Transaction]) -> [u8; 32] {
+        if transactions.is_empty() {
+            return [0u8; 32];
+        }
+
+        let mut layer: Vec<[u8; 32]> = transactions.iter().map(Self::transaction_hash).collect();
+
+        while layer.len() > 1 {
+            let mut next = Vec::with_capacity(layer.len().div_ceil(2));
+            for pair in layer.chunks(2) {
+                let right = pair.get(1).unwrap_or(&pair[0]);
+                let mut hasher = Sha3_256::new();
+                hasher.update(pair[0]);
+                hasher.update(right);
+                let mut hash = [0u8; 32];
+                hash.copy_from_slice(&hasher.finalize());
+                next.push(hash);
+            }
+            layer = next;
+        }
+
+        layer[0]
+    }
+
+    /// Checks that the header commits to exactly the transactions in the block.
+    pub fn verify_transaction_merkle_root(&self) -> bool {
+        self.header.tx_merkle_root == Self::transaction_merkle_root(&self.transactions)
+    }
+
+    fn transaction_hash(tx: &Transaction) -> [u8; 32] {
+        let mut hasher = Sha3_256::new();
+        hasher.update(Self::transaction_payload(tx));
+        hasher.update(&tx.public_key);
+        hasher.update(&tx.signature);
+        let mut hash = [0u8; 32];
+        hash.copy_from_slice(&hasher.finalize());
+        hash
+    }
+
     /// Computes a unique cryptographic SHA3-256 identification hash for the block
     pub fn calculate_hash(&self) -> [u8; 32] {
         let mut hasher = Sha3_256::new();
@@ -97,6 +147,7 @@ impl Mempool {
         hasher.update(tx.sender);
         hasher.update(tx.recipient);
         hasher.update(tx.amount.to_le_bytes());
+        hasher.update(&tx.public_key);
         hasher.update(&tx.signature);
 
         let mut tx_id = [0u8; 32];
@@ -227,5 +278,37 @@ mod consensus_tests {
         // Verification after first 4-year cycle threshold
         let (miner_era1, dev_era1) = VeloBlock::calculate_subsidy_split(BLOCKS_PER_ERA + 1);
         assert_eq!(miner_era1 + dev_era1, INITIAL_BLOCK_REWARD >> 1);
+    }
+
+    #[test]
+    fn transaction_merkle_root_commits_to_transaction_contents() {
+        let first = Transaction {
+            sender: [1u8; 32],
+            recipient: [2u8; 32],
+            amount: 10,
+            public_key: vec![3u8; 4],
+            signature: vec![4u8; 4],
+        };
+        let second = Transaction {
+            sender: [5u8; 32],
+            recipient: [6u8; 32],
+            amount: 20,
+            public_key: vec![7u8; 4],
+            signature: vec![8u8; 4],
+        };
+
+        let root = VeloBlock::transaction_merkle_root(&[first.clone(), second.clone()]);
+        assert_ne!(root, [0u8; 32]);
+        assert_ne!(
+            root,
+            VeloBlock::transaction_merkle_root(&[
+                first,
+                Transaction {
+                    amount: 21,
+                    ..second
+                }
+            ])
+        );
+        assert_eq!(VeloBlock::transaction_merkle_root(&[]), [0u8; 32]);
     }
 }

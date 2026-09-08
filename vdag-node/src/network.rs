@@ -196,6 +196,31 @@ fn validate_and_ingest(
         return Ok(());
     }
 
+    // Transaction bytes are committed by the header and each sender must
+    // prove ownership of the address included in the transaction.
+    if !block.verify_transaction_merkle_root() {
+        warn!(
+            height = block.header.height,
+            "Rejected block: transaction commitment mismatch"
+        );
+        return Ok(());
+    }
+    if block.transactions.iter().any(|tx| {
+        !vdag_crypto::verify_transaction_signature(
+            &tx.sender,
+            &tx.recipient,
+            tx.amount,
+            &tx.public_key,
+            &tx.signature,
+        )
+    }) {
+        warn!(
+            height = block.header.height,
+            "Rejected block: invalid transaction signature"
+        );
+        return Ok(());
+    }
+
     // 2. Proof-of-work must satisfy the target that was actually in force
     //    at this block's height -- not necessarily today's "current"
     //    target, since this block may be an orphan replay or a sync

@@ -221,6 +221,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 next_block.header.timestamp = timestamp;
                 next_block.header.difficulty_target = current_difficulty_target;
                 next_block.transactions = node_mempool.drain_to_batch(10);
+                next_block.header.tx_merkle_root = VeloBlock::transaction_merkle_root(&next_block.transactions);
 
                 if next_block.verify_coinbase_rewards() {
                     // Record the target we're about to mine against *before* mining,
@@ -308,6 +309,7 @@ fn simulate_transactions(mempool: &mut Mempool) {
             sender: sender_addr,
             recipient: recipient_addr,
             amount,
+            public_key: sender_keys.public_key_bytes(),
             signature,
         });
     }

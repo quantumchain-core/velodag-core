@@ -33,6 +33,11 @@ impl VeloKeyPair {
         address.copy_from_slice(&result);
         address
     }
+
+    /// Returns the public key in its canonical serialized form for transactions.
+    pub fn public_key_bytes(&self) -> Vec<u8> {
+        self.public_key.as_bytes().to_vec()
+    }
 }
 
 /// Cryptographically signs a transaction or message payload using the private key
@@ -48,6 +53,30 @@ pub fn verify_signature(message: &[u8], signature_bytes: &[u8], pk: &PublicKey) 
     } else {
         false
     }
+}
+
+/// Verifies a transaction signature and proves that the public key owns the sender address.
+pub fn verify_transaction_signature(
+    sender: &[u8; 32],
+    recipient: &[u8; 32],
+    amount: u64,
+    public_key_bytes: &[u8],
+    signature_bytes: &[u8],
+) -> bool {
+    let public_key = match PublicKey::from_bytes(public_key_bytes) {
+        Ok(public_key) => public_key,
+        Err(_) => return false,
+    };
+
+    if VeloKeyPair::derive_address(&public_key) != *sender {
+        return false;
+    }
+
+    let mut payload = Vec::with_capacity(32 + 32 + 8);
+    payload.extend_from_slice(sender);
+    payload.extend_from_slice(recipient);
+    payload.extend_from_slice(&amount.to_le_bytes());
+    verify_signature(&payload, signature_bytes, &public_key)
 }
 
 #[cfg(test)]
