@@ -80,6 +80,40 @@ The TCP port is randomized at startup. Save the complete address that includes:
 
 The node mines locally about once per second. Stop a foreground node with `Ctrl-C`.
 
+## Submit Transactions through Local RPC
+
+The node exposes a newline-delimited JSON-RPC server on `127.0.0.1:8545` by
+default. Override the bind address with `VDAG_RPC_ADDR`, for example:
+
+```bash
+VDAG_RPC_ADDR=127.0.0.1:18545 RUST_LOG=info ./vdag-node
+```
+
+The RPC listener is loopback-only by default. Do not bind it to `0.0.0.0` or
+forward it through a public tunnel without adding authentication and transport
+security.
+
+Submit a signed transaction with one JSON request per line:
+
+```bash
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"submit_transaction","params":{"sender":"<64-hex-address>","recipient":"<64-hex-address>","amount":1,"public_key":"<public-key-hex>","signature":"<signature-hex>"}}' | nc 127.0.0.1 8545
+```
+
+The node verifies the public-key ownership, signature, positive amount, and
+duplicate transaction ID before placing the transaction in the mempool. The
+miner includes accepted transactions in a later block if the sender has enough
+ledger balance.
+
+Check the current pending transaction count:
+
+```bash
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"method":"mempool_size"}' | nc 127.0.0.1 8545
+```
+
+This is the first local transaction intake interface. A public deployment still
+needs authenticated remote RPC, fees, replay protection, wallet tooling, and
+rate limits.
+
 ## Public Access with ngrok
 
 This Codespace runs Alpine Linux, so do not use the Debian `apt` ngrok

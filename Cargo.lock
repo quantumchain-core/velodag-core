@@ -3368,6 +3368,7 @@ dependencies = [
  "hex",
  "libp2p",
  "serde",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",

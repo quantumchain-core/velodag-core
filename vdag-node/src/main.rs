@@ -3,10 +3,13 @@
 pub mod behaviour;
 pub mod difficulty_log;
 pub mod network;
+pub mod rpc;
 pub mod sync;
 
 use std::env;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::sync::Mutex;
 use tokio::time::{interval_at, Instant};
 use tracing::{error, info, warn};
 
@@ -235,7 +238,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let miner_address = VeloKeyPair::derive_address(&miner_keys.public_key);
     info!(address = %format!("0x{}", encode_hex(&miner_address[0..6])), "[🔒 Crypto Engine] Local Miner Live");
 
-    let mut node_mempool = Mempool::new();
+    let node_mempool = Arc::new(Mutex::new(Mempool::new()));
+    let rpc_address = env::var("VDAG_RPC_ADDR").unwrap_or_else(|_| "127.0.0.1:8545".into());
+    tokio::spawn(rpc::serve(rpc_address, Arc::clone(&node_mempool)));
     let mut current_tips = block_history
         .last()
         .map(|block| {
@@ -279,7 +284,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 next_block.header.timestamp = timestamp;
                 next_block.header.difficulty_target = current_difficulty_target;
-                next_block.transactions = node_mempool.drain_to_batch(10);
+                next_block.transactions = node_mempool.lock().await.drain_to_batch(10);
                 next_block.header.tx_merkle_root = VeloBlock::transaction_merkle_root(&next_block.transactions);
 
                 if next_block.verify_coinbase_rewards() {
