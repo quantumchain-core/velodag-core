@@ -1,32 +1,33 @@
+pub mod daa;
 pub mod ghostdag;
 pub mod pow;
-pub mod daa;
 
-use sha3::{Digest, Sha3_256};
-use serde::{Serialize, Deserialize};
-use std::collections::HashMap;
 use ghostdag::GhostdagData;
+use serde::{Deserialize, Serialize};
+use sha3::{Digest, Sha3_256};
+use std::collections::HashMap;
 
 // --- CONSTANTS FOR VELODAG EMISSION (20-Year Supply Blueprint) ---
-pub const INITIAL_BLOCK_REWARD: u64 = 83_238; 
-pub const DEV_TAX_PERCENTAGE: u64 = 5;       
-pub const BLOCKS_PER_ERA: u64 = 126_144_000; 
+pub const INITIAL_BLOCK_REWARD: u64 = 83_238;
+pub const DEV_TAX_PERCENTAGE: u64 = 5;
+pub const BLOCKS_PER_ERA: u64 = 126_144_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlockHeader {
     pub timestamp: u64,
-    pub parents: Vec<[u8; 32]>, 
+    pub parents: Vec<[u8; 32]>,
     pub tx_merkle_root: [u8; 32],
     pub nonce: u64,
     pub height: u64,
+    pub difficulty_target: [u8; 32],
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Transaction {
-    pub sender: [u8; 32],      
-    pub recipient: [u8; 32],   
-    pub amount: u64,           
-    pub signature: Vec<u8>,    
+    pub sender: [u8; 32],
+    pub recipient: [u8; 32],
+    pub amount: u64,
+    pub signature: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,7 +49,8 @@ impl VeloBlock {
         }
         hasher.update(self.header.tx_merkle_root);
         hasher.update(self.header.nonce.to_le_bytes());
-        
+        hasher.update(self.header.difficulty_target);
+
         let result = hasher.finalize();
         let mut hash = [0u8; 32];
         hash.copy_from_slice(&result);
@@ -59,9 +61,9 @@ impl VeloBlock {
     pub fn calculate_subsidy_split(height: u64) -> (u64, u64) {
         let era = height / BLOCKS_PER_ERA;
         let total_subsidy = INITIAL_BLOCK_REWARD >> era;
-        
+
         if total_subsidy == 0 {
-            return (0, 0); 
+            return (0, 0);
         }
 
         let dev_share = (total_subsidy * DEV_TAX_PERCENTAGE) / 100;
@@ -92,11 +94,11 @@ impl Mempool {
     /// Inserts a newly received transaction into the unconfirmed queue
     pub fn add_transaction(&mut self, tx: Transaction) -> bool {
         let mut hasher = Sha3_256::new();
-        hasher.update(&tx.sender);
-        hasher.update(&tx.recipient);
-        hasher.update(&tx.amount.to_le_bytes());
+        hasher.update(tx.sender);
+        hasher.update(tx.recipient);
+        hasher.update(tx.amount.to_le_bytes());
         hasher.update(&tx.signature);
-        
+
         let mut tx_id = [0u8; 32];
         tx_id.copy_from_slice(&hasher.finalize());
 
@@ -111,14 +113,25 @@ impl Mempool {
     /// Pulls transactions out of the queue to package them cleanly inside a 1-second block
     pub fn drain_to_batch(&mut self, max_batch_size: usize) -> Vec<Transaction> {
         let mut batch = Vec::new();
-        let keys: Vec<[u8; 32]> = self.pending_transactions.keys().cloned().take(max_batch_size).collect();
-        
+        let keys: Vec<[u8; 32]> = self
+            .pending_transactions
+            .keys()
+            .cloned()
+            .take(max_batch_size)
+            .collect();
+
         for key in keys {
             if let Some(tx) = self.pending_transactions.remove(&key) {
                 batch.push(tx);
             }
         }
         batch
+    }
+}
+
+impl Default for Mempool {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -131,29 +144,41 @@ pub struct BlockchainStorage {
 impl BlockchainStorage {
     /// Opens local storage and configures tree structures for explicit state isolation
     pub fn open() -> Self {
-        let db = sled::open("velodag_ledger_data").expect("Failed to initialize storage database context");
-        
+        let db = sled::open("velodag_ledger_data")
+            .expect("Failed to initialize storage database context");
+
         // Open named sub-trees to separate raw blocks from consensus scoring metadata
-        let blocks_tree = db.open_tree(b"blocks").expect("Failed to open blocks data tree");
-        let ghostdag_tree = db.open_tree(b"ghostdag").expect("Failed to open ghostdag metadata tree");
-        
-        BlockchainStorage { 
-            blocks_tree, 
+        let blocks_tree = db
+            .open_tree(b"blocks")
+            .expect("Failed to open blocks data tree");
+        let ghostdag_tree = db
+            .open_tree(b"ghostdag")
+            .expect("Failed to open ghostdag metadata tree");
+
+        BlockchainStorage {
+            blocks_tree,
             ghostdag_tree,
-            db 
+            db,
         }
     }
 
     /// Serializes a VeloBlock into raw binary bytes and writes it permanently to disk
-    pub fn save_block(&self, block_hash: &[u8; 32], block: &VeloBlock) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn save_block(
+        &self,
+        block_hash: &[u8; 32],
+        block: &VeloBlock,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let serialized_bytes = bincode::serialize(block)?;
         self.blocks_tree.insert(block_hash, serialized_bytes)?;
-        self.db.flush()?; 
+        self.db.flush()?;
         Ok(())
     }
 
     /// Reads database bytes from disk using a block hash key and deserializes it back into a VeloBlock
-    pub fn load_block(&self, block_hash: &[u8; 32]) -> Result<Option<VeloBlock>, Box<dyn std::error::Error>> {
+    pub fn load_block(
+        &self,
+        block_hash: &[u8; 32],
+    ) -> Result<Option<VeloBlock>, Box<dyn std::error::Error>> {
         if let Some(bytes) = self.blocks_tree.get(block_hash)? {
             let block: VeloBlock = bincode::deserialize(&bytes)?;
             Ok(Some(block))
@@ -163,7 +188,11 @@ impl BlockchainStorage {
     }
 
     /// Persists GHOSTDAG coloring meta-states directly to database disk blocks
-    pub fn save_ghostdag_data(&self, block_hash: &[u8; 32], data: &GhostdagData) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn save_ghostdag_data(
+        &self,
+        block_hash: &[u8; 32],
+        data: &GhostdagData,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let serialized_bytes = bincode::serialize(data)?;
         self.ghostdag_tree.insert(block_hash, serialized_bytes)?;
         self.db.flush()?;
@@ -171,7 +200,10 @@ impl BlockchainStorage {
     }
 
     /// Loads historical GHOSTDAG color frameworks mapping to an existing block hash identification string
-    pub fn load_ghostdag_data(&self, block_hash: &[u8; 32]) -> Result<Option<GhostdagData>, Box<dyn std::error::Error>> {
+    pub fn load_ghostdag_data(
+        &self,
+        block_hash: &[u8; 32],
+    ) -> Result<Option<GhostdagData>, Box<dyn std::error::Error>> {
         if let Some(bytes) = self.ghostdag_tree.get(block_hash)? {
             let data: GhostdagData = bincode::deserialize(&bytes)?;
             Ok(Some(data))

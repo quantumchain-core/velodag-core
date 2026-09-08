@@ -1,6 +1,6 @@
 {
     "name": "VeloDAG Cloud Dev Environment",
-    "image": "://microsoft.com",
+    "image": "mcr.microsoft.com/devcontainers/rust:1-bookworm",
     "features": {
         "ghcr.io/devcontainers/features/common-utils:1": {
             "configureZshAsDefaultShell": true

@@ -33,32 +33,46 @@ The codebase is highly modularized into isolated Rust crates managed by a centra
 
 ---
 
-## 🛠️ Codespace Initialization & Execution Guide
+## 🛠️ Setup on Any Device
 
-VeloDAG is fully optimized for **GitHub Codespaces**. You do not need to install heavy compilers or software on your local machine; the environment sets up automatically inside your browser.
+VeloDAG is designed to run from a standard Rust dev environment or a GitHub Codespace. These commands are portable and do not rely on a fixed machine path.
 
-### 1. Launching the Cloud Dev Environment
-1. Navigate to this repository page on your browser.
-2. Click the green **Code** button on the right, select the **Codespaces** tab, and click **Create codespace on main**.
-3. Wait a few seconds for the virtual environment to load your pre-configured Rust toolchain.
+### 1. Clone and build
 
-### 2. Execute Internal Test Suites
-Verify that the underlying lattice cryptography signing engines and coinbase verification modules pass criteria:
+From a Unix-like shell:
+
 ```bash
+git clone https://github.com/quantumchain-core/velodag-core.git
+cd velodag-core
+cargo build --release
+```
+
+### 2. Verify the workspace
+
+```bash
+cargo check --workspace
 cargo test --workspace
 ```
 
-### 3. Run the High-Speed Node Backend
-Boot up the node environment to activate the automatic Genesis bootstrapper and start processing transaction simulation influxes live inside the 1-second BlockDAG intervals:
+### 3. Run the node
+
 ```bash
 cargo run -p vdag-node
 ```
 
-### 4. Query the Local Database via the CLI Explorer
-To inspect the properties of any historical block written to your disk storage directory (`velodag_ledger_data`), run the app with the explorer flag. For example, to read the hardcoded immutable **Genesis Block (Block 0)**, run:
+For a release binary built in the repo, run:
+
 ```bash
-cargo run -p vdag-node -- --get-block 0000000000000000000000000000000000000000000000000000000000000000
+./target/release/vdag-node
 ```
+
+### 4. Query the local ledger via explorer mode
+
+```bash
+./target/release/vdag-node --get-block 0000000000000000000000000000000000000000000000000000000000000000
+```
+
+If you are using the repo as a local checkout, the helper scripts in `scripts/testnet/` automatically detect the repo root and do not require a hardcoded path.
 
 ---
 ## 📜 License

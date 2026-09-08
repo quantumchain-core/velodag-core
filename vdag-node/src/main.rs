@@ -7,14 +7,15 @@ pub mod sync;
 
 use std::env;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::time::interval;
+use tokio::time::{interval_at, Instant};
 use tracing::{error, info, warn};
 
 use libp2p::{
     futures::StreamExt,
     gossipsub::{self, IdentTopic},
-    identity, mdns, noise, request_response, swarm::StreamProtocol, tcp, yamux, Multiaddr, Swarm,
-    SwarmBuilder,
+    identity, mdns, noise, request_response,
+    swarm::StreamProtocol,
+    tcp, yamux, Multiaddr, Swarm, SwarmBuilder,
 };
 
 use vdag_consensus::{
@@ -65,7 +66,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut swarm: Swarm<VeloBehaviour> = SwarmBuilder::with_existing_identity(local_key)
         .with_tokio()
-        .with_tcp(tcp::Config::default(), noise::Config::new, yamux::Config::default)?
+        .with_tcp(
+            tcp::Config::default(),
+            noise::Config::new,
+            yamux::Config::default,
+        )?
         .with_behaviour(|key| {
             // Gossipsub tuned for a small testnet mesh rather than the
             // mainnet-scale defaults, plus a hard cap on message size so a
@@ -75,15 +80,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .mesh_n_low(1)
                 .mesh_n(4)
                 .mesh_n_high(8)
+                .mesh_outbound_min(1) // must be <= mesh_n_low and <= mesh_n/2, or gossipsub refuses to start
                 .validation_mode(gossipsub::ValidationMode::Strict)
                 .build()
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                .map_err(std::io::Error::other)?;
 
             let mut gossipsub = gossipsub::Behaviour::new(
                 gossipsub::MessageAuthenticity::Signed(key.clone()),
                 gossipsub_config,
             )
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(std::io::Error::other)?;
 
             // Basic peer scoring: peers sending invalid/duplicate/spammy
             // gossip get penalized and eventually graylisted automatically.
@@ -92,16 +98,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     gossipsub::PeerScoreParams::default(),
                     gossipsub::PeerScoreThresholds::default(),
                 )
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                .map_err(std::io::Error::other)?;
 
-            let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), key.public().to_peer_id())?;
+            let mdns =
+                mdns::tokio::Behaviour::new(mdns::Config::default(), key.public().to_peer_id())?;
 
             let sync: SyncBehaviour = request_response::json::Behaviour::new(
-                [(StreamProtocol::new("/velodag/sync/1"), request_response::ProtocolSupport::Full)],
+                [(
+                    StreamProtocol::new("/velodag/sync/1"),
+                    request_response::ProtocolSupport::Full,
+                )],
                 request_response::Config::default(),
             );
 
-            Ok(VeloBehaviour { gossipsub, mdns, sync })
+            Ok(VeloBehaviour {
+                gossipsub,
+                mdns,
+                sync,
+            })
         })?
         .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
         .build();
@@ -150,18 +164,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let genesis_block = create_block(vec![], 0, 0, 0);
             let genesis_dag_data = ghostdag.calculate_ghostdag_data(&genesis_block, genesis_hash);
 
-            storage_engine.save_block(&genesis_hash, &genesis_block).unwrap();
-            storage_engine.save_ghostdag_data(&genesis_hash, &genesis_dag_data).unwrap();
+            storage_engine
+                .save_block(&genesis_hash, &genesis_block)
+                .unwrap();
+            storage_engine
+                .save_ghostdag_data(&genesis_hash, &genesis_dag_data)
+                .unwrap();
 
-            ghostdag.block_store.insert(genesis_hash, genesis_block.clone());
-            ghostdag.ghostdag_cache.insert(genesis_hash, genesis_dag_data);
+            ghostdag
+                .block_store
+                .insert(genesis_hash, genesis_block.clone());
+            ghostdag
+                .ghostdag_cache
+                .insert(genesis_hash, genesis_dag_data);
             block_history.push(genesis_block);
         }
         Ok(Some(genesis_blk)) => {
             info!("[💾 Storage Engine] Resuming ledger context.");
             let genesis_dag_data = ghostdag.calculate_ghostdag_data(&genesis_blk, genesis_hash);
-            ghostdag.block_store.insert(genesis_hash, genesis_blk.clone());
-            ghostdag.ghostdag_cache.insert(genesis_hash, genesis_dag_data);
+            ghostdag
+                .block_store
+                .insert(genesis_hash, genesis_blk.clone());
+            ghostdag
+                .ghostdag_cache
+                .insert(genesis_hash, genesis_dag_data);
             block_history.push(genesis_blk);
         }
         Err(e) => error!(error = %e, "[💾 Storage Engine Error] Initialization error"),
@@ -174,12 +200,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut node_mempool = Mempool::new();
     let mut current_tips = vec![genesis_hash];
     let mut block_height = 0;
-    let mut block_timer = interval(Duration::from_secs(1));
+    let mut sync_pending = false;
+    let mut block_timer = interval_at(
+        Instant::now() + Duration::from_secs(1),
+        Duration::from_secs(1),
+    );
 
     // 5. Unified Async Block Production & P2P Stream Selection Loop
     loop {
         tokio::select! {
-            _ = block_timer.tick() => {
+            _ = block_timer.tick(), if !sync_pending => {
                 block_height += 1;
 
                 simulate_transactions(&mut node_mempool);
@@ -189,6 +219,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 let mut next_block = create_block(current_tips.clone(), block_height, miner_reward, dev_reward);
                 next_block.header.timestamp = timestamp;
+                next_block.header.difficulty_target = current_difficulty_target;
                 next_block.transactions = node_mempool.drain_to_batch(10);
 
                 if next_block.verify_coinbase_rewards() {
@@ -234,8 +265,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &mut orphans,
                     &mut block_history,
                     &mut difficulty_log,
-                    current_difficulty_target,
                     genesis_hash,
+                    &mut sync_pending,
                 );
             }
         }
@@ -246,7 +277,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 fn create_block(parents: Vec<[u8; 32]>, height: u64, miner: u64, dev: u64) -> VeloBlock {
     VeloBlock {
-        header: BlockHeader { timestamp: 0, parents, tx_merkle_root: [0u8; 32], nonce: 0, height },
+        header: BlockHeader {
+            timestamp: 0,
+            parents,
+            tx_merkle_root: [0u8; 32],
+            nonce: 0,
+            height,
+            difficulty_target: [0x0f; 32],
+        },
         transactions: vec![],
         coinbase_miner_output: miner,
         coinbase_dev_output: dev,
@@ -266,7 +304,12 @@ fn simulate_transactions(mempool: &mut Mempool) {
         payload.extend_from_slice(&amount.to_le_bytes());
 
         let signature = vdag_crypto::sign_message(&payload, &sender_keys.secret_key);
-        mempool.add_transaction(Transaction { sender: sender_addr, recipient: recipient_addr, amount, signature });
+        mempool.add_transaction(Transaction {
+            sender: sender_addr,
+            recipient: recipient_addr,
+            amount,
+            signature,
+        });
     }
 }
 
@@ -283,13 +326,23 @@ fn run_explorer(storage: &BlockchainStorage, hash_str: &str) {
                 println!("\n==================================================");
                 println!("🧱 VELODAG BLOCK METADATA EXPLORER");
                 println!("==================================================");
-                println!("• Height: {} | Nonce: {}", block.header.height, block.header.nonce);
+                println!(
+                    "• Height: {} | Nonce: {}",
+                    block.header.height, block.header.nonce
+                );
                 println!("• Confirmed TXs: {}", block.transactions.len());
-                println!("• Miner Subsidy: {} | Dev Tax: {}", block.coinbase_miner_output, block.coinbase_dev_output);
+                println!(
+                    "• Miner Subsidy: {} | Dev Tax: {}",
+                    block.coinbase_miner_output, block.coinbase_dev_output
+                );
 
                 if let Ok(Some(dag)) = storage.load_ghostdag_data(&target_hash) {
                     println!("• GHOSTDAG Score: {}", dag.blue_score);
-                    println!("• Blue Count: {} | Red Count: {}", dag.blues.len(), dag.reds.len());
+                    println!(
+                        "• Blue Count: {} | Red Count: {}",
+                        dag.blues.len(),
+                        dag.reds.len()
+                    );
                 }
                 println!("==================================================\n");
             }
@@ -302,7 +355,10 @@ fn encode_hex(bytes: &[u8]) -> String {
 }
 
 fn decode_hex(s: &str) -> Result<Vec<u8>, std::num::ParseIntError> {
-    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16)).collect()
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16))
+        .collect()
 }
 
 /// Loads a persisted node identity from disk, or generates and saves a new

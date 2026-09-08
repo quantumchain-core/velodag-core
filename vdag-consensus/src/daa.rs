@@ -32,7 +32,7 @@ impl DifficultyManager {
         // 1. Calculate actual time elapsed over the sample window
         let earliest_timestamp = window.first().unwrap().header.timestamp;
         let latest_timestamp = window.last().unwrap().header.timestamp;
-        
+
         let actual_time_elapsed = if latest_timestamp > earliest_timestamp {
             latest_timestamp - earliest_timestamp
         } else {
@@ -80,6 +80,7 @@ mod tests {
                 tx_merkle_root: [0u8; 32],
                 nonce: 0,
                 height: 0,
+                difficulty_target: [0x0f; 32],
             },
             transactions: vec![],
             coinbase_miner_output: 0,
@@ -101,7 +102,7 @@ mod tests {
         ];
 
         let next_target = manager.calculate_next_target(&blocks, base_target);
-        
+
         // Target value should be smaller (closer to 0x00) which implies a harder cryptographic challenge
         assert!(next_target < base_target);
     }

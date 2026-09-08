@@ -1,12 +1,9 @@
 use pqcrypto_dilithium::dilithium2::{
-    detached_sign, verify_detached_signature, keypair, 
-    PublicKey, SecretKey, DetachedSignature
+    detached_sign, keypair, verify_detached_signature, DetachedSignature, PublicKey, SecretKey,
 };
 // Explicitly import signature traits to expose .as_bytes() and .from_bytes()
 use pqcrypto_traits::sign::{
-    DetachedSignature as DetachedSignatureTrait, 
-    PublicKey as PublicKeyTrait, 
-    SecretKey as SecretKeyTrait
+    DetachedSignature as DetachedSignatureTrait, PublicKey as PublicKeyTrait,
 };
 use sha3::{Digest, Sha3_256};
 
@@ -31,7 +28,7 @@ impl VeloKeyPair {
         let mut hasher = Sha3_256::new();
         hasher.update(pk.as_bytes());
         let result = hasher.finalize();
-        
+
         let mut address = [0u8; 32];
         address.copy_from_slice(&result);
         address
@@ -61,12 +58,15 @@ mod tests {
     fn test_quantum_crypto_flow() {
         let keys = VeloKeyPair::generate();
         let address = VeloKeyPair::derive_address(&keys.public_key);
-        
+
         let tx_data = b"transfer_100_vdag_to_recipient";
         let signature = sign_message(tx_data, &keys.secret_key);
-        
+
         let is_valid = verify_signature(tx_data, &signature, &keys.public_key);
         assert!(is_valid, "Cryptographic signature verification failed!");
-        println!("🚀 Quantum safe address derived successfully: {:?}", address);
+        println!(
+            "🚀 Quantum safe address derived successfully: {:?}",
+            address
+        );
     }
 }

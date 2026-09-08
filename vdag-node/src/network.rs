@@ -14,10 +14,10 @@
 
 use std::error::Error;
 
-use libp2p::{gossipsub, mdns, request_response, gossipsub::IdentTopic, swarm::SwarmEvent, Swarm};
+use libp2p::{gossipsub, gossipsub::IdentTopic, mdns, request_response, swarm::SwarmEvent, Swarm};
 use tracing::{info, warn};
 
-use vdag_consensus::{pow::PowManager, ghostdag::GhostdagManager, BlockchainStorage, VeloBlock};
+use vdag_consensus::{ghostdag::GhostdagManager, pow::PowManager, BlockchainStorage, VeloBlock};
 
 use crate::behaviour::{VeloBehaviour, VeloBehaviourEvent};
 use crate::difficulty_log::DifficultyLog;
@@ -38,8 +38,8 @@ pub fn handle_p2p_events(
     orphans: &mut OrphanPool,
     block_history: &mut Vec<VeloBlock>,
     difficulty_log: &mut DifficultyLog,
-    live_current_target: [u8; 32],
     genesis_hash: [u8; 32],
+    sync_pending: &mut bool,
 ) -> Result<(), Box<dyn Error>> {
     match event {
         // --- Gossip: new block from a peer ---
@@ -54,7 +54,6 @@ pub fn handle_p2p_events(
                 orphans,
                 block_history,
                 difficulty_log,
-                live_current_target,
             )?;
         }
 
@@ -69,7 +68,10 @@ pub fn handle_p2p_events(
         SwarmEvent::Behaviour(VeloBehaviourEvent::Mdns(mdns::Event::Expired(list))) => {
             for (peer_id, _addr) in list {
                 info!(%peer_id, "mDNS peer expired");
-                swarm.behaviour_mut().gossipsub.remove_explicit_peer(&peer_id);
+                swarm
+                    .behaviour_mut()
+                    .gossipsub
+                    .remove_explicit_peer(&peer_id);
             }
         }
 
@@ -78,7 +80,9 @@ pub fn handle_p2p_events(
             peer,
             message,
         })) => match message {
-            request_response::Message::Request { request, channel, .. } => {
+            request_response::Message::Request {
+                request, channel, ..
+            } => {
                 let response = build_sync_response(&request, genesis_hash, block_history);
                 let _ = swarm.behaviour_mut().sync.send_response(channel, response);
             }
@@ -92,15 +96,14 @@ pub fn handle_p2p_events(
                     orphans,
                     block_history,
                     difficulty_log,
-                    live_current_target,
                 )?;
+                *sync_pending = false;
             }
         },
-        SwarmEvent::Behaviour(VeloBehaviourEvent::Sync(request_response::Event::OutboundFailure {
-            peer,
-            error,
-            ..
-        })) => {
+        SwarmEvent::Behaviour(VeloBehaviourEvent::Sync(
+            request_response::Event::OutboundFailure { peer, error, .. },
+        )) => {
+            *sync_pending = false;
             warn!(%peer, %error, "Sync request failed");
         }
 
@@ -111,10 +114,18 @@ pub fn handle_p2p_events(
         // On connect, immediately ask the peer to fill in anything we're missing.
         SwarmEvent::ConnectionEstablished { peer_id, .. } => {
             info!(%peer_id, "Connection established");
-            let since_height = block_history.iter().map(|b| b.header.height).max().unwrap_or(0);
+            *sync_pending = true;
+            let since_height = block_history
+                .iter()
+                .map(|b| b.header.height)
+                .max()
+                .unwrap_or(0);
             swarm.behaviour_mut().sync.send_request(
                 &peer_id,
-                SyncRequest { genesis_hash, since_height },
+                SyncRequest {
+                    genesis_hash,
+                    since_height,
+                },
             );
         }
 
@@ -132,7 +143,6 @@ fn handle_gossip_block(
     orphans: &mut OrphanPool,
     block_history: &mut Vec<VeloBlock>,
     difficulty_log: &mut DifficultyLog,
-    live_current_target: [u8; 32],
 ) -> Result<(), Box<dyn Error>> {
     if message.topic != IdentTopic::new(GOSSIP_TOPIC).hash() {
         return Ok(());
@@ -153,7 +163,6 @@ fn handle_gossip_block(
         orphans,
         block_history,
         difficulty_log,
-        live_current_target,
     )
 }
 
@@ -171,7 +180,6 @@ fn validate_and_ingest(
     orphans: &mut OrphanPool,
     block_history: &mut Vec<VeloBlock>,
     difficulty_log: &mut DifficultyLog,
-    live_current_target: [u8; 32],
 ) -> Result<(), Box<dyn Error>> {
     let hash = block.calculate_hash();
 
@@ -181,7 +189,10 @@ fn validate_and_ingest(
 
     // 1. Coinbase / dev-tax split must match consensus rules exactly.
     if !block.verify_coinbase_rewards() {
-        warn!(height = block.header.height, "Rejected block: bad coinbase split");
+        warn!(
+            height = block.header.height,
+            "Rejected block: bad coinbase split"
+        );
         return Ok(());
     }
 
@@ -191,10 +202,13 @@ fn validate_and_ingest(
     //    catch-up block mined under an older difficulty. Genesis is exempt
     //    (never gossiped/mined via PoW).
     if block.header.height > 0 {
-        let target = difficulty_log.get(block.header.height).unwrap_or(live_current_target);
+        let target = block.header.difficulty_target;
         let pow = PowManager::new(target);
         if !pow.verify_pow(&block) {
-            warn!(height = block.header.height, "Rejected block: insufficient PoW");
+            warn!(
+                height = block.header.height,
+                "Rejected block: insufficient PoW"
+            );
             return Ok(());
         }
         difficulty_log.record(block.header.height, target);
@@ -203,8 +217,11 @@ fn validate_and_ingest(
     // 3. Every parent must already be known locally, or this block gets
     //    parked as an orphan until the missing parent arrives.
     for parent in &block.header.parents {
-        if ghostdag.block_store.get(parent).is_none() {
-            info!(height = block.header.height, "Missing parent, buffering as orphan");
+        if !ghostdag.block_store.contains_key(parent) {
+            info!(
+                height = block.header.height,
+                "Missing parent, buffering as orphan"
+            );
             orphans.insert(*parent, block);
             return Ok(());
         }
@@ -225,7 +242,6 @@ fn validate_and_ingest(
             orphans,
             block_history,
             difficulty_log,
-            live_current_target,
         )?;
     }
 
@@ -275,7 +291,11 @@ fn build_sync_response(
         .cloned()
         .collect();
 
-    info!(count = blocks.len(), since_height = request.since_height, "Sending sync response");
+    info!(
+        count = blocks.len(),
+        since_height = request.since_height,
+        "Sending sync response"
+    );
     SyncResponse::Blocks(blocks)
 }
 
@@ -289,7 +309,6 @@ fn handle_sync_response(
     orphans: &mut OrphanPool,
     block_history: &mut Vec<VeloBlock>,
     difficulty_log: &mut DifficultyLog,
-    live_current_target: [u8; 32],
 ) -> Result<(), Box<dyn Error>> {
     match response {
         SyncResponse::Blocks(blocks) => {
@@ -297,8 +316,7 @@ fn handle_sync_response(
             for block in blocks {
                 // Routed through the same validate_and_ingest as everything
                 // else: coinbase check, PoW checked against the recorded
-                // target for that block's own height (falling back to the
-                // live target only if we have no record for it), and
+                // target committed in that block's own header, and
                 // parent-existence / orphan handling.
                 validate_and_ingest(
                     block,
@@ -307,7 +325,6 @@ fn handle_sync_response(
                     orphans,
                     block_history,
                     difficulty_log,
-                    live_current_target,
                 )?;
             }
         }

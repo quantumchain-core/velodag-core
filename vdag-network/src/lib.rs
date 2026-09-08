@@ -1,8 +1,6 @@
-use libp2p::{
-    gossipsub, mdns, noise, tcp, yamux, SwarmBuilder, PeerId
-};
-use libp2p::swarm::SwarmEvent;
 use futures::StreamExt;
+use libp2p::swarm::SwarmEvent;
+use libp2p::{gossipsub, mdns, noise, tcp, yamux, PeerId, SwarmBuilder};
 use std::error::Error;
 use std::time::Duration;
 
@@ -18,7 +16,10 @@ pub async fn start_p2p_engine() -> Result<(), Box<dyn Error>> {
     // 1. Generate an identity keypair for this specific computer instance
     let local_key = libp2p::identity::Keypair::generate_ed25519();
     let local_peer_id = PeerId::from(local_key.public());
-    println!("[🌐 P2P Network] Generating node network ID: {}", local_peer_id);
+    println!(
+        "[🌐 P2P Network] Generating node network ID: {}",
+        local_peer_id
+    );
 
     // 2. Configure a low-level encrypted TCP connection channel
     let mut swarm = SwarmBuilder::with_existing_identity(local_key)
@@ -60,22 +61,31 @@ pub async fn start_p2p_engine() -> Result<(), Box<dyn Error>> {
         loop {
             match swarm.select_next_some().await {
                 // CORRECTED: In libp2p 0.53, the macro events are nested inside an inner Event enum under your struct name
-                SwarmEvent::Behaviour(VeloNetworkBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
+                SwarmEvent::Behaviour(VeloNetworkBehaviourEvent::Mdns(
+                    mdns::Event::Discovered(list),
+                )) => {
                     for (peer_id, multiaddr) in list {
-                        println!("[📡 Discovery] Found active peer node: {} at {}", peer_id, multiaddr);
+                        println!(
+                            "[📡 Discovery] Found active peer node: {} at {}",
+                            peer_id, multiaddr
+                        );
                         let _ = swarm.dial(multiaddr);
                     }
                 }
-                SwarmEvent::Behaviour(VeloNetworkBehaviourEvent::Mdns(mdns::Event::Expired(list))) => {
+                SwarmEvent::Behaviour(VeloNetworkBehaviourEvent::Mdns(mdns::Event::Expired(
+                    list,
+                ))) => {
                     for (peer_id, _multiaddr) in list {
                         println!("[📡 Discovery] Peer node connection lost: {}", peer_id);
                     }
                 }
-                SwarmEvent::Behaviour(VeloNetworkBehaviourEvent::Gossipsub(gossipsub::Event::Message {
-                    propagation_source,
-                    message_id,
-                    ..
-                })) => {
+                SwarmEvent::Behaviour(VeloNetworkBehaviourEvent::Gossipsub(
+                    gossipsub::Event::Message {
+                        propagation_source,
+                        message_id,
+                        ..
+                    },
+                )) => {
                     println!(
                         "[📥 P2P Message] Received broadcast data hash: {} from peer: {}",
                         message_id, propagation_source

@@ -68,10 +68,16 @@ impl OrphanPool {
         if self.current_size >= self.max_size {
             // Simple backpressure: refuse new orphans rather than growing
             // unbounded under a flood of blocks with bad/missing parents.
-            warn!(max_size = self.max_size, "Orphan pool full -- dropping orphan");
+            warn!(
+                max_size = self.max_size,
+                "Orphan pool full -- dropping orphan"
+            );
             return;
         }
-        self.waiting_on.entry(missing_parent).or_default().push(block);
+        self.waiting_on
+            .entry(missing_parent)
+            .or_default()
+            .push(block);
         self.current_size += 1;
     }
 

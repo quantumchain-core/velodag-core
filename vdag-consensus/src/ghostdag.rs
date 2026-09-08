@@ -1,8 +1,8 @@
 // vdag-consensus/src/ghostdag.rs
 
-use std::collections::{HashMap, HashSet, VecDeque};
-use serde::{Serialize, Deserialize};
 use crate::VeloBlock;
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 pub type BlockHash = [u8; 32];
 
@@ -10,13 +10,13 @@ pub type BlockHash = [u8; 32];
 pub struct GhostdagData {
     pub blue_score: u64,
     pub selected_parent: Option<BlockHash>,
-    pub blues: Vec<BlockHash>, 
-    pub reds: Vec<BlockHash>,  
+    pub blues: Vec<BlockHash>,
+    pub reds: Vec<BlockHash>,
 }
 
 pub struct GhostdagManager {
-    pub k: usize, 
-    pub block_store: HashMap<BlockHash, VeloBlock>, 
+    pub k: usize,
+    pub block_store: HashMap<BlockHash, VeloBlock>,
     pub ghostdag_cache: HashMap<BlockHash, GhostdagData>,
 }
 
@@ -30,7 +30,11 @@ impl GhostdagManager {
     }
 
     /// Primary entry point to color and sort a block according to GHOSTDAG protocol rules
-    pub fn calculate_ghostdag_data(&mut self, block: &VeloBlock, block_hash: BlockHash) -> GhostdagData {
+    pub fn calculate_ghostdag_data(
+        &mut self,
+        block: &VeloBlock,
+        _block_hash: BlockHash,
+    ) -> GhostdagData {
         // 1. Genesis Block Check (Has no parents)
         if block.header.parents.is_empty() {
             return GhostdagData {
@@ -42,7 +46,10 @@ impl GhostdagManager {
         }
 
         // 2. Find the Selected Parent (the parent hash with the highest blue score)
-        let selected_parent = block.header.parents.iter()
+        let selected_parent = block
+            .header
+            .parents
+            .iter()
             .filter_map(|p| self.ghostdag_cache.get(p).map(|data| (p, data)))
             .max_by_key(|(_, data)| data.blue_score)
             .map(|(hash, _)| *hash);
@@ -67,7 +74,7 @@ impl GhostdagManager {
 
             // 4. Deterministically sort anticone to maintain uniform consensus calculation across peers
             let mut sorted_anticone = anticone;
-            sorted_anticone.sort(); 
+            sorted_anticone.sort();
 
             for candidate in sorted_anticone {
                 if self.can_be_blue(&candidate, &blues) {
@@ -93,7 +100,11 @@ impl GhostdagManager {
     }
 
     /// DISCOVERY ENGINE: Finds parallel blocks that are neither ancestors nor descendants of the selected parent
-    fn find_anticone(&self, current_block: &VeloBlock, selected_parent: &BlockHash) -> Vec<BlockHash> {
+    fn find_anticone(
+        &self,
+        current_block: &VeloBlock,
+        selected_parent: &BlockHash,
+    ) -> Vec<BlockHash> {
         let mut anticone = Vec::new();
         let mut queue = VecDeque::new();
         let mut visited = HashSet::new();
@@ -131,14 +142,17 @@ impl GhostdagManager {
     /// STRICT K-FACTOR CONSTRAINT ENGINE: Verifies the true blue anticone size threshold rule
     fn can_be_blue(&self, candidate: &BlockHash, current_blues: &[BlockHash]) -> bool {
         let candidate_past = self.get_past_set(candidate);
-        
+
         for blue in current_blues {
             let blue_past = self.get_past_set(blue);
-            
+
             // If the candidate block is not in the past of the blue block,
             // and the blue block is not in the past of the candidate block,
             // they are mutually in each other's anticones.
-            if !blue_past.contains(candidate) && !candidate_past.contains(blue) && *blue != *candidate {
+            if !blue_past.contains(candidate)
+                && !candidate_past.contains(blue)
+                && *blue != *candidate
+            {
                 // Count how many current blues are also in this specific blue block's anticone
                 let mut anticone_count = 0;
                 for other_blue in current_blues {
@@ -149,7 +163,7 @@ impl GhostdagManager {
                         }
                     }
                 }
-                
+
                 // If it pushes the anticone size over K limits, it must be marked Red
                 if anticone_count >= self.k {
                     return false;
@@ -195,7 +209,7 @@ impl GhostdagManager {
                         order.push(block);
                     }
                 }
-                
+
                 if !order.contains(&hash) {
                     order.push(hash);
                 }
@@ -222,6 +236,7 @@ mod tests {
                 tx_merkle_root: [0u8; 32],
                 nonce: 0,
                 height: 0,
+                difficulty_target: [0x0f; 32],
             },
             transactions: vec![],
             coinbase_miner_output: 0,

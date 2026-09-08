@@ -3,7 +3,7 @@
 use crate::VeloBlock;
 
 pub struct PowManager {
-    pub target_difficulty: [u8; 32], 
+    pub target_difficulty: [u8; 32],
 }
 
 impl PowManager {
@@ -15,12 +15,12 @@ impl PowManager {
     pub fn mine_block(&self, block: &mut VeloBlock) -> [u8; 32] {
         loop {
             let hash = block.calculate_hash();
-            
+
             // Check if hash matches difficulty threshold boundaries
             if hash <= self.target_difficulty {
                 return hash;
             }
-            
+
             block.header.nonce += 1;
         }
     }
@@ -40,9 +40,9 @@ mod tests {
     #[test]
     fn test_mine_and_verify_block() {
         // Setup an intentionally easy target for rapid testing (high byte values)
-        let mut easy_target = [0xff; 32]; 
+        let mut easy_target = [0xff; 32];
         easy_target[0] = 0x0f; // Limit the first byte to enforce a small difficulty challenge
-        
+
         let pow_manager = PowManager::new(easy_target);
 
         // Instantiate using your proper VeloBlock data layout matching lib.rs
@@ -53,6 +53,7 @@ mod tests {
                 tx_merkle_root: [0u8; 32],
                 nonce: 0,
                 height: 1,
+                difficulty_target: easy_target,
             },
             transactions: vec![],
             coinbase_miner_output: 83238,
@@ -61,7 +62,7 @@ mod tests {
 
         // Mine the block
         let computed_hash = pow_manager.mine_block(&mut block);
-        
+
         // Assert that the nonce was modified and the hash meets target criteria
         assert!(block.header.nonce > 0);
         assert!(computed_hash <= easy_target);
