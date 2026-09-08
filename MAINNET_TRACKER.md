@@ -51,6 +51,8 @@ This tracker describes the current repository state. A feature is marked done on
 - [x] Wallet creation and address derivation CLI commands exist.
 - [x] Wallet CLI signs the canonical transfer payload.
 - [x] Wallet CLI can submit signed transfers to the local RPC.
+- [x] Wallet key material is encrypted with a password-derived key.
+- [x] Wrong wallet passwords are rejected by authenticated decryption.
 
 ### Local networking and operations
 
@@ -83,7 +85,8 @@ This tracker describes the current repository state. A feature is marked done on
 - [ ] Add state migration/versioning for database upgrades.
 - [ ] Reconcile alternate DAG branches instead of applying every accepted block to one linear balance state.
 - [x] Add wallet transaction creation CLI.
-- [ ] Add encrypted key storage, secure backup/recovery, and hardware-wallet support.
+- [x] Add encrypted key storage.
+- [ ] Add secure backup/recovery procedures and hardware-wallet support.
 
 ### Networking security
 

@@ -116,10 +116,12 @@ rate limits.
 
 ### Wallet CLI
 
-The release binary can create a local Dilithium wallet and sign the exact
-transaction format accepted by the RPC:
+The release binary can create an encrypted local Dilithium wallet and sign the
+exact transaction format accepted by the RPC. Supply the passphrase through the
+environment, never as a command-line argument:
 
 ```bash
+export VDAG_WALLET_PASSWORD='use-a-secret-from-your-password-manager'
 ./target/release/vdag-node wallet create "$HOME/vdag-wallet.json"
 ./target/release/vdag-node wallet address "$HOME/vdag-wallet.json"
 ./target/release/vdag-node wallet sign-transfer \
@@ -137,8 +139,10 @@ To sign and submit in one command to a local node:
 ```
 
 Wallet files contain private Dilithium key material. Protect them with file
-permissions and encrypted backups; this CLI does not yet provide password-based
-encryption or hardware-wallet protection.
+permissions and encrypted backups. The wallet file uses Argon2 key derivation
+and ChaCha20-Poly1305 authenticated encryption. This CLI does not yet provide
+hardware-wallet protection or password recovery; losing the passphrase loses
+access to the wallet.
 
 ## Public Access with ngrok
 

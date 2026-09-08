@@ -1,5 +1,11 @@
 use std::path::Path;
 
+use argon2::Argon2;
+use chacha20poly1305::{
+    aead::{Aead, KeyInit},
+    ChaCha20Poly1305, Key, Nonce,
+};
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
@@ -8,6 +14,14 @@ use vdag_crypto::VeloKeyPair;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct WalletFile {
+    version: u8,
+    salt: String,
+    nonce: String,
+    ciphertext: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct WalletPayload {
     public_key: String,
     secret_key: String,
 }
@@ -18,10 +32,11 @@ pub fn create(path: &str) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let keys = VeloKeyPair::generate();
-    let wallet = WalletFile {
+    let payload = WalletPayload {
         public_key: hex::encode(keys.public_key_bytes()),
         secret_key: hex::encode(keys.secret_key_bytes()),
     };
+    let wallet = encrypt(&payload, &password()?)?;
     std::fs::write(path, serde_json::to_vec_pretty(&wallet)?)?;
     set_private_permissions(path)?;
     println!(
@@ -112,10 +127,71 @@ pub async fn submit(
 
 fn load(path: &str) -> Result<VeloKeyPair, Box<dyn std::error::Error>> {
     let bytes = std::fs::read(path)?;
-    let wallet: WalletFile = serde_json::from_slice(&bytes)?;
-    let public_key = hex::decode(wallet.public_key)?;
-    let secret_key = hex::decode(wallet.secret_key)?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+    let payload = if value.get("version").is_some() {
+        let wallet: WalletFile = serde_json::from_value(value)?;
+        decrypt(&wallet, &password()?)?
+    } else {
+        eprintln!("warning: plaintext wallet format; migrate it before mainnet use");
+        serde_json::from_value::<WalletPayload>(value)?
+    };
+    let public_key = hex::decode(payload.public_key)?;
+    let secret_key = hex::decode(payload.secret_key)?;
     Ok(VeloKeyPair::from_bytes(&public_key, &secret_key)?)
+}
+
+fn password() -> Result<String, Box<dyn std::error::Error>> {
+    std::env::var("VDAG_WALLET_PASSWORD").map_err(|_| {
+        "set VDAG_WALLET_PASSWORD in the terminal; never pass it as a CLI argument".into()
+    })
+}
+
+fn encrypt(
+    payload: &WalletPayload,
+    password: &str,
+) -> Result<WalletFile, Box<dyn std::error::Error>> {
+    let mut salt = [0u8; 16];
+    let mut nonce = [0u8; 12];
+    rand::thread_rng().fill_bytes(&mut salt);
+    rand::thread_rng().fill_bytes(&mut nonce);
+    let mut key_bytes = [0u8; 32];
+    Argon2::default()
+        .hash_password_into(password.as_bytes(), &salt, &mut key_bytes)
+        .map_err(|error| format!("password key derivation failed: {error}"))?;
+    let cipher = ChaCha20Poly1305::new(Key::from_slice(&key_bytes));
+    let ciphertext = cipher
+        .encrypt(
+            Nonce::from_slice(&nonce),
+            serde_json::to_vec(payload)?.as_ref(),
+        )
+        .map_err(|_| "wallet encryption failed")?;
+    Ok(WalletFile {
+        version: 1,
+        salt: hex::encode(salt),
+        nonce: hex::encode(nonce),
+        ciphertext: hex::encode(ciphertext),
+    })
+}
+
+fn decrypt(
+    wallet: &WalletFile,
+    password: &str,
+) -> Result<WalletPayload, Box<dyn std::error::Error>> {
+    if wallet.version != 1 {
+        return Err(format!("unsupported wallet version: {}", wallet.version).into());
+    }
+    let salt = hex::decode(&wallet.salt)?;
+    let nonce = hex::decode(&wallet.nonce)?;
+    let ciphertext = hex::decode(&wallet.ciphertext)?;
+    let mut key_bytes = [0u8; 32];
+    Argon2::default()
+        .hash_password_into(password.as_bytes(), &salt, &mut key_bytes)
+        .map_err(|error| format!("password key derivation failed: {error}"))?;
+    let cipher = ChaCha20Poly1305::new(Key::from_slice(&key_bytes));
+    let plaintext = cipher
+        .decrypt(Nonce::from_slice(&nonce), ciphertext.as_ref())
+        .map_err(|_| "wallet decryption failed; check VDAG_WALLET_PASSWORD")?;
+    Ok(serde_json::from_slice(&plaintext)?)
 }
 
 fn parse_address(value: &str) -> Result<[u8; 32], Box<dyn std::error::Error>> {
