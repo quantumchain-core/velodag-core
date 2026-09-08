@@ -20,7 +20,7 @@ use libp2p::{
 
 use vdag_consensus::{
     daa::DifficultyManager, ghostdag::GhostdagManager, pow::PowManager, BlockHeader,
-    BlockchainStorage, Mempool, Transaction, VeloBlock,
+    BlockchainStorage, LedgerState, Mempool, VeloBlock, DEV_TREASURY_ADDRESS,
 };
 use vdag_crypto::VeloKeyPair;
 
@@ -146,6 +146,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 3. Initialize Core Consensus Subsystems
     let mut ghostdag = GhostdagManager::new(3);
+    let mut ledger_state = LedgerState::default();
     let difficulty_manager = DifficultyManager::new(1, 4);
     let mut current_difficulty_target = [0x0f; 32];
     let mut block_history: Vec<VeloBlock> = Vec::new();
@@ -161,7 +162,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match storage_engine.load_block(&genesis_hash) {
         Ok(None) => {
             info!("[🧱 Genesis Engine] Minting Genesis Block 0...");
-            let genesis_block = create_block(vec![], 0, 0, 0);
+            let genesis_block = create_block(vec![], 0, [0u8; 32], 0, [0u8; 32], 0);
+            ledger_state.apply_block(&genesis_block).unwrap();
             let genesis_dag_data = ghostdag.calculate_ghostdag_data(&genesis_block, genesis_hash);
 
             storage_engine
@@ -212,18 +214,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             _ = block_timer.tick(), if !sync_pending => {
                 block_height += 1;
 
-                simulate_transactions(&mut node_mempool);
-
                 let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
                 let (miner_reward, dev_reward) = VeloBlock::calculate_subsidy_split(block_height);
 
-                let mut next_block = create_block(current_tips.clone(), block_height, miner_reward, dev_reward);
+                let mut next_block = create_block(
+                    current_tips.clone(),
+                    block_height,
+                    miner_address,
+                    miner_reward,
+                    DEV_TREASURY_ADDRESS,
+                    dev_reward,
+                );
                 next_block.header.timestamp = timestamp;
                 next_block.header.difficulty_target = current_difficulty_target;
                 next_block.transactions = node_mempool.drain_to_batch(10);
                 next_block.header.tx_merkle_root = VeloBlock::transaction_merkle_root(&next_block.transactions);
 
                 if next_block.verify_coinbase_rewards() {
+                    if let Err(reason) = ledger_state.apply_block(&next_block) {
+                        warn!(height = block_height, %reason, "Local block rejected by ledger state");
+                        continue;
+                    }
                     // Record the target we're about to mine against *before* mining,
                     // so any peer that later needs to validate this exact block
                     // (orphan replay, sync catch-up) checks it against the same
@@ -266,6 +277,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &mut orphans,
                     &mut block_history,
                     &mut difficulty_log,
+                    &mut ledger_state,
                     genesis_hash,
                     &mut sync_pending,
                 );
@@ -276,7 +288,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 // --- UTILITIES ---
 
-fn create_block(parents: Vec<[u8; 32]>, height: u64, miner: u64, dev: u64) -> VeloBlock {
+fn create_block(
+    parents: Vec<[u8; 32]>,
+    height: u64,
+    miner_address: [u8; 32],
+    miner: u64,
+    dev_address: [u8; 32],
+    dev: u64,
+) -> VeloBlock {
     VeloBlock {
         header: BlockHeader {
             timestamp: 0,
@@ -287,31 +306,10 @@ fn create_block(parents: Vec<[u8; 32]>, height: u64, miner: u64, dev: u64) -> Ve
             difficulty_target: [0x0f; 32],
         },
         transactions: vec![],
+        coinbase_miner_address: miner_address,
         coinbase_miner_output: miner,
+        coinbase_dev_address: dev_address,
         coinbase_dev_output: dev,
-    }
-}
-
-fn simulate_transactions(mempool: &mut Mempool) {
-    for i in 1..=3 {
-        let sender_keys = VeloKeyPair::generate();
-        let sender_addr = VeloKeyPair::derive_address(&sender_keys.public_key);
-        let recipient_addr = [i; 32];
-        let amount = (i as u64) * 500_000;
-
-        let mut payload = Vec::new();
-        payload.extend_from_slice(&sender_addr);
-        payload.extend_from_slice(&recipient_addr);
-        payload.extend_from_slice(&amount.to_le_bytes());
-
-        let signature = vdag_crypto::sign_message(&payload, &sender_keys.secret_key);
-        mempool.add_transaction(Transaction {
-            sender: sender_addr,
-            recipient: recipient_addr,
-            amount,
-            public_key: sender_keys.public_key_bytes(),
-            signature,
-        });
     }
 }
 

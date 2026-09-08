@@ -5,12 +5,13 @@ pub mod pow;
 use ghostdag::GhostdagData;
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 // --- CONSTANTS FOR VELODAG EMISSION (20-Year Supply Blueprint) ---
 pub const INITIAL_BLOCK_REWARD: u64 = 83_238;
 pub const DEV_TAX_PERCENTAGE: u64 = 5;
 pub const BLOCKS_PER_ERA: u64 = 126_144_000;
+pub const DEV_TREASURY_ADDRESS: [u8; 32] = [0xdd; 32];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlockHeader {
@@ -35,7 +36,9 @@ pub struct Transaction {
 pub struct VeloBlock {
     pub header: BlockHeader,
     pub transactions: Vec<Transaction>,
+    pub coinbase_miner_address: [u8; 32],
     pub coinbase_miner_output: u64,
+    pub coinbase_dev_address: [u8; 32],
     pub coinbase_dev_output: u64,
 }
 
@@ -55,7 +58,7 @@ impl VeloBlock {
             return [0u8; 32];
         }
 
-        let mut layer: Vec<[u8; 32]> = transactions.iter().map(Self::transaction_hash).collect();
+        let mut layer: Vec<[u8; 32]> = transactions.iter().map(Self::transaction_id).collect();
 
         while layer.len() > 1 {
             let mut next = Vec::with_capacity(layer.len().div_ceil(2));
@@ -79,7 +82,7 @@ impl VeloBlock {
         self.header.tx_merkle_root == Self::transaction_merkle_root(&self.transactions)
     }
 
-    fn transaction_hash(tx: &Transaction) -> [u8; 32] {
+    pub fn transaction_id(tx: &Transaction) -> [u8; 32] {
         let mut hasher = Sha3_256::new();
         hasher.update(Self::transaction_payload(tx));
         hasher.update(&tx.public_key);
@@ -100,6 +103,8 @@ impl VeloBlock {
         hasher.update(self.header.tx_merkle_root);
         hasher.update(self.header.nonce.to_le_bytes());
         hasher.update(self.header.difficulty_target);
+        hasher.update(self.coinbase_miner_address);
+        hasher.update(self.coinbase_dev_address);
 
         let result = hasher.finalize();
         let mut hash = [0u8; 32];
@@ -129,6 +134,94 @@ impl VeloBlock {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct LedgerState {
+    balances: HashMap<[u8; 32], u64>,
+    confirmed_transactions: HashSet<[u8; 32]>,
+}
+
+impl LedgerState {
+    pub fn balance(&self, address: &[u8; 32]) -> u64 {
+        self.balances.get(address).copied().unwrap_or(0)
+    }
+
+    /// Atomically validates and applies a block's transfers and coinbase outputs.
+    pub fn apply_block(&mut self, block: &VeloBlock) -> Result<(), String> {
+        let mut balances = self.balances.clone();
+        let mut confirmed_transactions = self.confirmed_transactions.clone();
+
+        if block.header.height == 0 {
+            if !block.transactions.is_empty()
+                || block.coinbase_miner_output != 0
+                || block.coinbase_dev_output != 0
+            {
+                return Err("genesis block contains spendable outputs".into());
+            }
+            self.balances = balances;
+            self.confirmed_transactions = confirmed_transactions;
+            return Ok(());
+        }
+
+        if !block.verify_coinbase_rewards() {
+            return Err("invalid coinbase amount".into());
+        }
+        if block.coinbase_dev_address != DEV_TREASURY_ADDRESS {
+            return Err("invalid development treasury address".into());
+        }
+
+        let mut block_transactions = HashSet::new();
+        for tx in &block.transactions {
+            let tx_id = VeloBlock::transaction_id(tx);
+            if !block_transactions.insert(tx_id) || !confirmed_transactions.insert(tx_id) {
+                return Err("duplicate transaction".into());
+            }
+
+            if tx.amount == 0 {
+                return Err("transaction amount must be positive".into());
+            }
+
+            let sender_balance = balances.get(&tx.sender).copied().unwrap_or(0);
+            let remaining = sender_balance
+                .checked_sub(tx.amount)
+                .ok_or_else(|| "insufficient balance".to_string())?;
+            balances.insert(tx.sender, remaining);
+            let recipient_balance = balances.get(&tx.recipient).copied().unwrap_or(0);
+            balances.insert(
+                tx.recipient,
+                recipient_balance
+                    .checked_add(tx.amount)
+                    .ok_or_else(|| "recipient balance overflow".to_string())?,
+            );
+        }
+
+        let miner_balance = balances
+            .get(&block.coinbase_miner_address)
+            .copied()
+            .unwrap_or(0);
+        balances.insert(
+            block.coinbase_miner_address,
+            miner_balance
+                .checked_add(block.coinbase_miner_output)
+                .ok_or_else(|| "miner balance overflow".to_string())?,
+        );
+
+        let dev_balance = balances
+            .get(&block.coinbase_dev_address)
+            .copied()
+            .unwrap_or(0);
+        balances.insert(
+            block.coinbase_dev_address,
+            dev_balance
+                .checked_add(block.coinbase_dev_output)
+                .ok_or_else(|| "treasury balance overflow".to_string())?,
+        );
+
+        self.balances = balances;
+        self.confirmed_transactions = confirmed_transactions;
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Mempool {
     pub pending_transactions: HashMap<[u8; 32], Transaction>,
@@ -143,15 +236,7 @@ impl Mempool {
 
     /// Inserts a newly received transaction into the unconfirmed queue
     pub fn add_transaction(&mut self, tx: Transaction) -> bool {
-        let mut hasher = Sha3_256::new();
-        hasher.update(tx.sender);
-        hasher.update(tx.recipient);
-        hasher.update(tx.amount.to_le_bytes());
-        hasher.update(&tx.public_key);
-        hasher.update(&tx.signature);
-
-        let mut tx_id = [0u8; 32];
-        tx_id.copy_from_slice(&hasher.finalize());
+        let tx_id = VeloBlock::transaction_id(&tx);
 
         if self.pending_transactions.contains_key(&tx_id) {
             return false;
@@ -310,5 +395,59 @@ mod consensus_tests {
             ])
         );
         assert_eq!(VeloBlock::transaction_merkle_root(&[]), [0u8; 32]);
+    }
+
+    #[test]
+    fn ledger_state_tracks_rewards_and_rejects_invalid_spends() {
+        let miner = [1u8; 32];
+        let recipient = [2u8; 32];
+        let mut state = LedgerState::default();
+        let (miner_reward, dev_reward) = VeloBlock::calculate_subsidy_split(1);
+
+        let reward_block = VeloBlock {
+            header: BlockHeader {
+                timestamp: 1,
+                parents: vec![[0u8; 32]],
+                tx_merkle_root: [0u8; 32],
+                nonce: 0,
+                height: 1,
+                difficulty_target: [0xff; 32],
+            },
+            transactions: vec![],
+            coinbase_miner_address: miner,
+            coinbase_miner_output: miner_reward,
+            coinbase_dev_address: DEV_TREASURY_ADDRESS,
+            coinbase_dev_output: dev_reward,
+        };
+        state.apply_block(&reward_block).unwrap();
+        assert_eq!(state.balance(&miner), miner_reward);
+
+        let tx = Transaction {
+            sender: miner,
+            recipient,
+            amount: miner_reward,
+            public_key: vec![],
+            signature: vec![],
+        };
+        let (next_miner_reward, next_dev_reward) = VeloBlock::calculate_subsidy_split(2);
+        let spend_block = VeloBlock {
+            header: BlockHeader {
+                timestamp: 2,
+                parents: vec![reward_block.calculate_hash()],
+                tx_merkle_root: VeloBlock::transaction_merkle_root(std::slice::from_ref(&tx)),
+                nonce: 0,
+                height: 2,
+                difficulty_target: [0xff; 32],
+            },
+            transactions: vec![tx.clone()],
+            coinbase_miner_address: miner,
+            coinbase_miner_output: next_miner_reward,
+            coinbase_dev_address: DEV_TREASURY_ADDRESS,
+            coinbase_dev_output: next_dev_reward,
+        };
+        state.apply_block(&spend_block).unwrap();
+        assert_eq!(state.balance(&miner), next_miner_reward);
+        assert_eq!(state.balance(&recipient), miner_reward);
+        assert!(state.apply_block(&spend_block).is_err());
     }
 }

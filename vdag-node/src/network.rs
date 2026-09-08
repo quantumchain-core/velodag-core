@@ -17,7 +17,9 @@ use std::error::Error;
 use libp2p::{gossipsub, gossipsub::IdentTopic, mdns, request_response, swarm::SwarmEvent, Swarm};
 use tracing::{info, warn};
 
-use vdag_consensus::{ghostdag::GhostdagManager, pow::PowManager, BlockchainStorage, VeloBlock};
+use vdag_consensus::{
+    ghostdag::GhostdagManager, pow::PowManager, BlockchainStorage, LedgerState, VeloBlock,
+};
 
 use crate::behaviour::{VeloBehaviour, VeloBehaviourEvent};
 use crate::difficulty_log::DifficultyLog;
@@ -38,6 +40,7 @@ pub fn handle_p2p_events(
     orphans: &mut OrphanPool,
     block_history: &mut Vec<VeloBlock>,
     difficulty_log: &mut DifficultyLog,
+    ledger_state: &mut LedgerState,
     genesis_hash: [u8; 32],
     sync_pending: &mut bool,
 ) -> Result<(), Box<dyn Error>> {
@@ -54,6 +57,7 @@ pub fn handle_p2p_events(
                 orphans,
                 block_history,
                 difficulty_log,
+                ledger_state,
             )?;
         }
 
@@ -96,6 +100,7 @@ pub fn handle_p2p_events(
                     orphans,
                     block_history,
                     difficulty_log,
+                    ledger_state,
                 )?;
                 *sync_pending = false;
             }
@@ -143,6 +148,7 @@ fn handle_gossip_block(
     orphans: &mut OrphanPool,
     block_history: &mut Vec<VeloBlock>,
     difficulty_log: &mut DifficultyLog,
+    ledger_state: &mut LedgerState,
 ) -> Result<(), Box<dyn Error>> {
     if message.topic != IdentTopic::new(GOSSIP_TOPIC).hash() {
         return Ok(());
@@ -163,6 +169,7 @@ fn handle_gossip_block(
         orphans,
         block_history,
         difficulty_log,
+        ledger_state,
     )
 }
 
@@ -180,6 +187,7 @@ fn validate_and_ingest(
     orphans: &mut OrphanPool,
     block_history: &mut Vec<VeloBlock>,
     difficulty_log: &mut DifficultyLog,
+    ledger_state: &mut LedgerState,
 ) -> Result<(), Box<dyn Error>> {
     let hash = block.calculate_hash();
 
@@ -252,6 +260,11 @@ fn validate_and_ingest(
         }
     }
 
+    if let Err(reason) = ledger_state.apply_block(&block) {
+        warn!(height = block.header.height, %reason, "Rejected block: invalid ledger state");
+        return Ok(());
+    }
+
     let ingested_hash = ingest_block_only(block, storage, ghostdag, block_history)?;
 
     // A block landing may unblock orphans that were waiting specifically on
@@ -267,6 +280,7 @@ fn validate_and_ingest(
             orphans,
             block_history,
             difficulty_log,
+            ledger_state,
         )?;
     }
 
@@ -334,6 +348,7 @@ fn handle_sync_response(
     orphans: &mut OrphanPool,
     block_history: &mut Vec<VeloBlock>,
     difficulty_log: &mut DifficultyLog,
+    ledger_state: &mut LedgerState,
 ) -> Result<(), Box<dyn Error>> {
     match response {
         SyncResponse::Blocks(blocks) => {
@@ -350,6 +365,7 @@ fn handle_sync_response(
                     orphans,
                     block_history,
                     difficulty_log,
+                    ledger_state,
                 )?;
             }
         }

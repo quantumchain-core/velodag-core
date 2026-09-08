@@ -239,7 +239,9 @@ mod tests {
                 difficulty_target: [0x0f; 32],
             },
             transactions: vec![],
+            coinbase_miner_address: [0u8; 32],
             coinbase_miner_output: 0,
+            coinbase_dev_address: [0u8; 32],
             coinbase_dev_output: 0,
         }
     }
