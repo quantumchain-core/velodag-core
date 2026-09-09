@@ -101,9 +101,21 @@ pub fn default_bootstrap_config(network_name: &str) -> BootstrapConfig {
     }
 }
 
+pub fn bootstrap_config_path(network_name: &str) -> String {
+    env::var("VDAG_BOOTSTRAP_CONFIG")
+        .unwrap_or_else(|_| format!("bootstrap.{}.json", network_name))
+}
+
 pub fn load_bootstrap_config(network_name: &str) -> Result<BootstrapConfig, String> {
-    let path = format!("bootstrap.{}.json", network_name);
-    match std::fs::read_to_string(&path) {
+    let path = bootstrap_config_path(network_name);
+    load_bootstrap_config_from_path(&path, network_name)
+}
+
+pub fn load_bootstrap_config_from_path(
+    path: &str,
+    network_name: &str,
+) -> Result<BootstrapConfig, String> {
+    match std::fs::read_to_string(path) {
         Ok(contents) => {
             let config: BootstrapConfig = serde_json::from_str(&contents)
                 .map_err(|err| format!("failed to parse {path}: {err}"))?;
@@ -141,5 +153,32 @@ mod tests {
         .with_signature(&secret);
 
         assert!(cfg.verify_signature());
+    }
+
+    #[test]
+    fn bootstrap_config_loads_from_explicit_path() {
+        let dir = std::env::temp_dir().join(format!(
+            "velodag-bootstrap-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("bootstrap.testnet.json");
+        let secret = SigningKey::from_bytes(&[9u8; 32]);
+        let cfg = BootstrapConfig {
+            network: "testnet".to_string(),
+            network_id: 2,
+            genesis_hash: "deadbeef".repeat(8),
+            seeds: vec!["/ip4/127.0.0.1/tcp/4001".to_string()],
+            signing_key: String::new(),
+            signature: String::new(),
+        }
+        .with_signature(&secret);
+
+        std::fs::write(&path, serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
+        let loaded = load_bootstrap_config_from_path(path.to_str().unwrap(), "testnet").unwrap();
+        assert_eq!(loaded.network, "testnet");
+        assert_eq!(loaded.seeds.len(), 1);
+        assert!(loaded.verify_signature());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

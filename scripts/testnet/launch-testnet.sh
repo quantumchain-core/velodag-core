@@ -8,6 +8,7 @@ BASE_DIR="${1:-$HOME/velodag-test}"
 NODE_A_DIR="$BASE_DIR/node-a"
 NODE_B_DIR="$BASE_DIR/node-b"
 BINARY="${VDAG_BINARY:-$REPO_ROOT/target/release/vdag-node}"
+VDAG_NETWORK_VALUE="${VDAG_NETWORK:-devnet}"
 
 strip_ansi() {
   python3 - "$1" <<'PY'
@@ -36,7 +37,7 @@ cp "$BINARY" "$NODE_A_DIR/vdag-node"
 cp "$BINARY" "$NODE_B_DIR/vdag-node"
 
 echo "[1/2] Starting seed node in $NODE_A_DIR"
-./scripts/testnet/start-node.sh "$NODE_A_DIR"
+VDAG_NETWORK="$VDAG_NETWORK_VALUE" VDAG_BOOTSTRAP_CONFIG="$REPO_ROOT/bootstrap.${VDAG_NETWORK_VALUE}.json" ./scripts/testnet/start-node.sh "$NODE_A_DIR"
 
 for _ in $(seq 1 30); do
   if [ -f "$NODE_A_DIR/node.log" ]; then
@@ -67,7 +68,7 @@ chmod 600 "$NODE_B_DIR/bootstrap_peers.txt" 2>/dev/null || true
 echo "Seed peer: $BOOTSTRAP_ADDR"
 
 echo "[2/2] Starting second node in $NODE_B_DIR"
-./scripts/testnet/start-node.sh "$NODE_B_DIR"
+VDAG_NETWORK="$VDAG_NETWORK_VALUE" VDAG_BOOTSTRAP_CONFIG="$REPO_ROOT/bootstrap.${VDAG_NETWORK_VALUE}.json" ./scripts/testnet/start-node.sh "$NODE_B_DIR"
 
 echo "--- node-a status ---"
 ./scripts/testnet/healthcheck.sh "$NODE_A_DIR" | tail -n 20
