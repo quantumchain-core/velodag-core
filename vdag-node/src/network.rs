@@ -6,11 +6,14 @@
 //
 // One important property of this file: gossip blocks, orphan replays, and
 // sync catch-up blocks all funnel through the *same* `validate_and_ingest`
-// function. Earlier versions took a shortcut for orphan/sync paths that
-// skipped re-validation or checked PoW against the wrong (current, rather
-// than historical) difficulty target -- that gap is closed by looking up
-// each block's height in `DifficultyLog` rather than assuming "current" is
-// correct.
+// function -- no path takes a shortcut. That includes the difficulty
+// target: a block's header *declares* the target it claims to have been
+// mined under, but that declaration is only checked for real against
+// `current_difficulty_target`, a value tracked identically here and in the
+// local mining loop by independently running the same DAA calculation.
+// Trusting a block's self-declared target without this check would let a
+// peer gossip an arbitrarily easy target and have it pass PoW verification
+// against its own say-so.
 
 use std::error::Error;
 
@@ -18,7 +21,8 @@ use libp2p::{gossipsub, gossipsub::IdentTopic, mdns, request_response, swarm::Sw
 use tracing::{info, warn};
 
 use vdag_consensus::{
-    ghostdag::GhostdagManager, pow::PowManager, BlockchainStorage, LedgerState, VeloBlock,
+    daa::DifficultyManager, ghostdag::GhostdagManager, pow::PowManager, BlockchainStorage,
+    LedgerState, VeloBlock,
 };
 
 use crate::behaviour::{VeloBehaviour, VeloBehaviourEvent};
@@ -43,6 +47,8 @@ pub fn handle_p2p_events(
     ledger_state: &mut LedgerState,
     genesis_hash: [u8; 32],
     sync_pending: &mut bool,
+    difficulty_manager: &DifficultyManager,
+    current_difficulty_target: &mut [u8; 32],
 ) -> Result<(), Box<dyn Error>> {
     match event {
         // --- Gossip: new block from a peer ---
@@ -58,6 +64,8 @@ pub fn handle_p2p_events(
                 block_history,
                 difficulty_log,
                 ledger_state,
+                difficulty_manager,
+                current_difficulty_target,
             )?;
         }
 
@@ -101,6 +109,8 @@ pub fn handle_p2p_events(
                     block_history,
                     difficulty_log,
                     ledger_state,
+                    difficulty_manager,
+                    current_difficulty_target,
                 )?;
                 *sync_pending = false;
             }
@@ -150,6 +160,8 @@ fn handle_gossip_block(
     block_history: &mut Vec<VeloBlock>,
     difficulty_log: &mut DifficultyLog,
     ledger_state: &mut LedgerState,
+    difficulty_manager: &DifficultyManager,
+    current_difficulty_target: &mut [u8; 32],
 ) -> Result<(), Box<dyn Error>> {
     if message.topic != IdentTopic::new(GOSSIP_TOPIC).hash() {
         return Ok(());
@@ -171,16 +183,28 @@ fn handle_gossip_block(
         block_history,
         difficulty_log,
         ledger_state,
+        difficulty_manager,
+        current_difficulty_target,
     )
 }
 
 /// Full consensus validation before a block is allowed anywhere near local
-/// state: reward-split check, proof-of-work check (against the target that
-/// was actually active at that block's height, per `difficulty_log`), then
+/// state: reward-split check, transaction commitment/signature checks,
+/// difficulty-target authenticity check, proof-of-work check, then
 /// parent-existence check (orphaning it if a parent is missing).
+///
+/// The difficulty-target check is the important one: a block's header
+/// *declares* the target it was mined under, but that declaration is only
+/// trustworthy once it's checked against what the DAA actually says should
+/// apply at this point in the chain (`current_difficulty_target`, tracked
+/// identically here and in the local mining loop). Without this check, a
+/// peer could gossip a block declaring a trivially easy target and it would
+/// pass PoW verification against its own say-so -- checking a block against
+/// a target it chose itself proves nothing.
 ///
 /// This is the single validation path used for live gossip blocks, orphan
 /// replays, and sync catch-up blocks alike -- no path takes a shortcut.
+#[allow(clippy::too_many_arguments)]
 fn validate_and_ingest(
     block: VeloBlock,
     storage: &BlockchainStorage,
@@ -189,6 +213,8 @@ fn validate_and_ingest(
     block_history: &mut Vec<VeloBlock>,
     difficulty_log: &mut DifficultyLog,
     ledger_state: &mut LedgerState,
+    difficulty_manager: &DifficultyManager,
+    current_difficulty_target: &mut [u8; 32],
 ) -> Result<(), Box<dyn Error>> {
     let hash = block.calculate_hash();
 
@@ -231,14 +257,21 @@ fn validate_and_ingest(
         return Ok(());
     }
 
-    // 2. Proof-of-work must satisfy the target that was actually in force
-    //    at this block's height -- not necessarily today's "current"
-    //    target, since this block may be an orphan replay or a sync
-    //    catch-up block mined under an older difficulty. Genesis is exempt
-    //    (never gossiped/mined via PoW).
+    // 2. Proof-of-work must satisfy the target the DAA actually expects at
+    //    this point in the chain -- NOT whatever the block itself claims.
+    //    A block declaring an easy target it made up would otherwise pass
+    //    PoW verification trivially against its own self-selected value.
     if block.header.height > 0 {
-        let target = block.header.difficulty_target;
-        let pow = PowManager::new(target);
+        let expected_target = *current_difficulty_target;
+        if block.header.difficulty_target != expected_target {
+            warn!(
+                height = block.header.height,
+                "Rejected block: declared difficulty target does not match the expected consensus target"
+            );
+            return Ok(());
+        }
+
+        let pow = PowManager::new(expected_target);
         if !pow.verify_pow(&block) {
             warn!(
                 height = block.header.height,
@@ -246,7 +279,7 @@ fn validate_and_ingest(
             );
             return Ok(());
         }
-        difficulty_log.record(block.header.height, target);
+        difficulty_log.record(block.header.height, expected_target);
     }
 
     // 3. Every parent must already be known locally, or this block gets
@@ -273,9 +306,17 @@ fn validate_and_ingest(
 
     let ingested_hash = ingest_block_only(block, storage, ghostdag, block_history)?;
 
+    // Advance the shared expected-target state the same way the local
+    // mining loop does, using the now-extended block_history. This keeps
+    // validation and mining following the identical DAA progression --
+    // whether the next block comes from this node's own miner or from a
+    // peer, both are checked against the same expected value.
+    *current_difficulty_target =
+        difficulty_manager.calculate_next_target(block_history, *current_difficulty_target);
+
     // A block landing may unblock orphans that were waiting specifically on
     // it. They go back through this same validate_and_ingest path, so
-    // they're checked against their own height's recorded target rather
+    // they're checked against their own height's expected target rather
     // than being ingested blind.
     let ready = orphans.take_ready(&ingested_hash);
     for orphan in ready {
@@ -287,6 +328,8 @@ fn validate_and_ingest(
             block_history,
             difficulty_log,
             ledger_state,
+            difficulty_manager,
+            current_difficulty_target,
         )?;
     }
 
@@ -359,15 +402,17 @@ fn handle_sync_response(
     block_history: &mut Vec<VeloBlock>,
     difficulty_log: &mut DifficultyLog,
     ledger_state: &mut LedgerState,
+    difficulty_manager: &DifficultyManager,
+    current_difficulty_target: &mut [u8; 32],
 ) -> Result<(), Box<dyn Error>> {
     match response {
         SyncResponse::Blocks(blocks) => {
             info!(count = blocks.len(), %peer, "Received sync catch-up blocks");
             for block in blocks {
                 // Routed through the same validate_and_ingest as everything
-                // else: coinbase check, PoW checked against the recorded
-                // target committed in that block's own header, and
-                // parent-existence / orphan handling.
+                // else: coinbase check, transaction checks, difficulty
+                // target authenticity check, PoW, and parent-existence /
+                // orphan handling.
                 validate_and_ingest(
                     block,
                     storage,
@@ -376,6 +421,8 @@ fn handle_sync_response(
                     block_history,
                     difficulty_log,
                     ledger_state,
+                    difficulty_manager,
+                    current_difficulty_target,
                 )?;
             }
         }
