@@ -17,13 +17,44 @@ pub const TESTNET_NETWORK_ID: u64 = 2;
 pub const MAINNET_NETWORK_ID: u64 = 3;
 pub const ACTIVE_NETWORK_ID: u64 = DEVNET_NETWORK_ID;
 
+// Each network gets its own fixed genesis timestamp, which is what makes
+// their genesis blocks (and therefore hashes) distinct from one another.
+// TESTNET and MAINNET values below are placeholders -- they must be
+// replaced with the real, publicly-announced launch moment for each
+// network before that network actually goes live. Devnet's is fine to
+// treat as permanent since devnet is allowed to be informal.
+pub const DEVNET_GENESIS_TIMESTAMP: u64 = 1_700_000_000;
+pub const TESTNET_GENESIS_TIMESTAMP: u64 = 1_700_000_001; // PLACEHOLDER -- set before public testnet
+pub const MAINNET_GENESIS_TIMESTAMP: u64 = 1_700_000_002; // PLACEHOLDER -- set before mainnet
+
+/// Returns the fixed genesis timestamp for a given network ID, or `None`
+/// for an unrecognized ID (callers should treat that as a hard error, not
+/// silently fall back to devnet).
+pub fn genesis_timestamp_for_network(network_id: u64) -> Option<u64> {
+    match network_id {
+        DEVNET_NETWORK_ID => Some(DEVNET_GENESIS_TIMESTAMP),
+        TESTNET_NETWORK_ID => Some(TESTNET_GENESIS_TIMESTAMP),
+        MAINNET_NETWORK_ID => Some(MAINNET_GENESIS_TIMESTAMP),
+        _ => None,
+    }
+}
+
 /// Immutable protocol-freeze: every node on the same network must agree on
 /// the same canonical genesis block and network ID before any sync/gossip
 /// traffic is accepted.
-pub fn fixed_genesis_block() -> VeloBlock {
+///
+/// Genesis fields are fixed for every network except `timestamp`, which
+/// varies per network (see `genesis_timestamp_for_network`) -- that's what
+/// makes each network's genesis hash distinct. An unrecognized network_id
+/// falls back to devnet's timestamp rather than failing, since this is
+/// only ever called with an ID that's already been resolved/validated
+/// upstream (see `network_config::resolve_network_id`, which itself
+/// defaults unknown names to devnet).
+pub fn fixed_genesis_block_for_network(network_id: u64) -> VeloBlock {
+    let timestamp = genesis_timestamp_for_network(network_id).unwrap_or(DEVNET_GENESIS_TIMESTAMP);
     VeloBlock {
         header: BlockHeader {
-            timestamp: 1_700_000_000,
+            timestamp,
             parents: vec![],
             tx_merkle_root: [0u8; 32],
             nonce: 0,
@@ -36,6 +67,18 @@ pub fn fixed_genesis_block() -> VeloBlock {
         coinbase_dev_address: DEV_TREASURY_ADDRESS,
         coinbase_dev_output: 0,
     }
+}
+
+pub fn fixed_genesis_hash_for_network(network_id: u64) -> [u8; 32] {
+    fixed_genesis_block_for_network(network_id).calculate_hash()
+}
+
+/// Devnet-defaulting convenience wrappers, kept so existing call sites that
+/// don't (yet) thread a specific network_id through keep working unchanged.
+/// Prefer the `_for_network` variants directly wherever the actual runtime
+/// network selection matters (which is everywhere in main.rs / network.rs).
+pub fn fixed_genesis_block() -> VeloBlock {
+    fixed_genesis_block_for_network(ACTIVE_NETWORK_ID)
 }
 
 pub fn fixed_genesis_hash() -> [u8; 32] {
@@ -548,5 +591,24 @@ mod consensus_tests {
         assert!(genesis.header.parents.is_empty());
         assert_eq!(fixed_genesis_hash(), genesis.calculate_hash());
         assert_ne!(fixed_genesis_hash(), [0u8; 32]);
+    }
+
+    /// Regression test: `fixed_genesis_hash_for_network` previously ignored
+    /// which network was actually requested and always returned the same
+    /// hash regardless -- meaning devnet, testnet, and mainnet would all
+    /// share one genesis. Each network must produce a distinct hash.
+    #[test]
+    fn genesis_hash_differs_per_network() {
+        let devnet = fixed_genesis_hash_for_network(DEVNET_NETWORK_ID);
+        let testnet = fixed_genesis_hash_for_network(TESTNET_NETWORK_ID);
+        let mainnet = fixed_genesis_hash_for_network(MAINNET_NETWORK_ID);
+
+        assert_ne!(devnet, testnet);
+        assert_ne!(devnet, mainnet);
+        assert_ne!(testnet, mainnet);
+
+        // Unrecognized network IDs fall back to devnet's genesis rather
+        // than producing an unpredictable/undefined result.
+        assert_eq!(fixed_genesis_hash_for_network(9999), devnet);
     }
 }
