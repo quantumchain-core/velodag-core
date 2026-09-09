@@ -380,6 +380,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &mut ledger_state,
                     genesis_hash,
                     &mut sync_pending,
+                    &difficulty_manager,
+                    &mut current_difficulty_target,
                 );
             }
         }
