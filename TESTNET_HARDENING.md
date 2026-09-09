@@ -7,6 +7,7 @@ This repository is now code-complete for a local/devnet proof and has the final 
 - Rust workspace builds cleanly with `cargo check --workspace` and `cargo test --workspace`
 - The node persists its libp2p identity in `node_identity.key` so Peer IDs stay stable
 - Bootstrap peers can be supplied from `bootstrap_peers.txt`
+- Signed environment bootstrap files such as `bootstrap.devnet.json` and `bootstrap.testnet.json` are supported
 - Gossipsub mesh settings are valid and no longer fail on startup
 - Sync gating prevents local mining while the node is still catching up
 - Difficulty targets are committed into each block header and validated consistently
@@ -25,6 +26,8 @@ This repository is now code-complete for a local/devnet proof and has the final 
 ### 2. Bootstrap policy
 
 - Use a fixed set of bootstrap nodes with stable IPs and maintained peer IDs
+- Store bootstrap metadata in signed JSON files like `bootstrap.devnet.json` and `bootstrap.testnet.json`
+- Set `VDAG_NETWORK=devnet|testnet|mainnet` to select the correct signed bootstrap set for the node
 - Do not allow arbitrary dial-in peers without a allowlist or operator review
 - Prefer a curated seed list for the first public testnet wave
 - Require peer address validation before adding a new seed or relay node

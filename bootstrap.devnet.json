@@ -1,0 +1,10 @@
+{
+  "network": "devnet",
+  "network_id": 1,
+  "genesis_hash": "1b8d2992f399a1b5d8f5037f9d46885d655eec96d6b8f7af1c084a183d2a82a5",
+  "seeds": [
+    "/ip4/127.0.0.1/tcp/4001"
+  ],
+  "signing_key": "123a68539dc9342ca2c557902fdc3a469ea4fcd1d360dacc8d9e506d3af9db33",
+  "signature": "b7e8b61696efb2d7c17a731a149d8175bdf4e5b2d6a2265780872ba55b68ac1fc95ec636e0e447e5ffca5401c0c30f5a97e72fb4ecf2b169a5c93de056a0a80a"
+}

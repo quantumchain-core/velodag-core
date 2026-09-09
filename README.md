@@ -66,7 +66,23 @@ For a release binary built in the repo, run:
 ./target/release/vdag-node
 ```
 
-### 4. Query the local ledger via explorer mode
+### 4. Use the signed bootstrap config for the active network
+
+The repo supports environment-aware bootstrap policy via `VDAG_NETWORK`:
+
+```bash
+VDAG_NETWORK=devnet ./target/release/vdag-node
+VDAG_NETWORK=testnet ./target/release/vdag-node
+```
+
+Signed config files are shipped in the repo root:
+
+- `bootstrap.devnet.json`
+- `bootstrap.testnet.json`
+
+These files are validated before the node dials any bootstrap peers.
+
+### 5. Query the local ledger via explorer mode
 
 ```bash
 ./target/release/vdag-node --get-block 0000000000000000000000000000000000000000000000000000000000000000

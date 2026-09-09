@@ -1,0 +1,11 @@
+{
+  "network": "testnet",
+  "network_id": 2,
+  "genesis_hash": "1b8d2992f399a1b5d8f5037f9d46885d655eec96d6b8f7af1c084a183d2a82a5",
+  "seeds": [
+    "/ip4/127.0.0.1/tcp/4001",
+    "/ip4/127.0.0.1/tcp/4002"
+  ],
+  "signing_key": "111bfa7197d4b53f63517d1c5ad56d4dff8c1f182dee9c3f53c08b63e51f5458",
+  "signature": "4ce7cf1ca8d865c77461c000ad5debc5b52a73eb408e4ce0e49317ddde84cf225bce9b37005b119f593baceb1661444ef22ac4ece522b59bbf53c19d6448320b"
+}
