@@ -49,6 +49,7 @@ pub fn handle_p2p_events(
     sync_pending: &mut bool,
     difficulty_manager: &DifficultyManager,
     current_difficulty_target: &mut [u8; 32],
+    local_network_id: u64,
 ) -> Result<(), Box<dyn Error>> {
     match event {
         // --- Gossip: new block from a peer ---
@@ -95,7 +96,7 @@ pub fn handle_p2p_events(
             request_response::Message::Request {
                 request, channel, ..
             } => {
-                let response = build_sync_response(&request, genesis_hash, block_history);
+                let response = build_sync_response(&request, genesis_hash, block_history, local_network_id);
                 let _ = swarm.behaviour_mut().sync.send_response(channel, response);
             }
             request_response::Message::Response { response, .. } => {
@@ -138,7 +139,7 @@ pub fn handle_p2p_events(
             swarm.behaviour_mut().sync.send_request(
                 &peer_id,
                 SyncRequest {
-                    network_id: vdag_consensus::ACTIVE_NETWORK_ID,
+                    network_id: local_network_id,
                     genesis_hash,
                     since_height,
                 },
@@ -366,11 +367,12 @@ fn build_sync_response(
     request: &SyncRequest,
     genesis_hash: [u8; 32],
     block_history: &[VeloBlock],
+    local_network_id: u64,
 ) -> SyncResponse {
-    if request.network_id != vdag_consensus::ACTIVE_NETWORK_ID || request.genesis_hash != genesis_hash {
+    if request.network_id != local_network_id || request.genesis_hash != genesis_hash {
         warn!(
             requested_network = request.network_id,
-            local_network = vdag_consensus::ACTIVE_NETWORK_ID,
+            local_network = local_network_id,
             "Peer requested sync on a different network or genesis -- refusing"
         );
         return SyncResponse::GenesisMismatch;
