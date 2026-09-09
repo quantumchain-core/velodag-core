@@ -24,9 +24,8 @@ use libp2p::{
 };
 
 use vdag_consensus::{
-    daa::DifficultyManager, fixed_genesis_block, fixed_genesis_hash, ghostdag::GhostdagManager,
-    pow::PowManager, BlockHeader, BlockchainStorage, LedgerState, Mempool, VeloBlock,
-    DEV_TREASURY_ADDRESS,
+    daa::DifficultyManager, ghostdag::GhostdagManager, pow::PowManager, BlockHeader,
+    BlockchainStorage, LedgerState, Mempool, VeloBlock, DEV_TREASURY_ADDRESS,
 };
 use vdag_crypto::VeloKeyPair;
 
@@ -198,7 +197,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // checked against the target that was actually in force then, not
     // whatever "current" happens to be by the time they're processed.
     let mut difficulty_log = DifficultyLog::new();
-    let genesis_hash = fixed_genesis_hash();
+    let genesis_hash = vdag_consensus::fixed_genesis_hash_for_network(network_id);
+    if network_id != vdag_consensus::DEVNET_NETWORK_ID {
+        warn!(
+            network = %network_name,
+            network_id,
+            "Running on a non-devnet network whose genesis timestamp is still a PLACEHOLDER \
+             value in vdag-consensus/src/lib.rs -- this must be replaced with the real, \
+             publicly-announced launch moment before this network is treated as live."
+        );
+    }
     let persisted_ledger_state = match storage_engine.load_ledger_state() {
         Ok(state) => state,
         Err(e) => {
@@ -211,7 +219,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match storage_engine.load_block(&genesis_hash) {
         Ok(None) => {
             info!("[🧱 Genesis Engine] Minting Fixed Genesis Block 0...");
-            let genesis_block = fixed_genesis_block();
+            let genesis_block = vdag_consensus::fixed_genesis_block_for_network(network_id);
             ledger_state.apply_block(&genesis_block).unwrap();
             let genesis_dag_data = ghostdag.calculate_ghostdag_data(&genesis_block, genesis_hash);
 
@@ -382,6 +390,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &mut sync_pending,
                     &difficulty_manager,
                     &mut current_difficulty_target,
+                    network_id,
                 );
             }
         }
