@@ -76,9 +76,11 @@ pub fn resolve_network_id(network_name: &str) -> u64 {
     }
 }
 
+/// Returns the fixed genesis hash for the given network name (devnet /
+/// testnet / mainnet). Each network has its own distinct genesis -- see
+/// `vdag_consensus::fixed_genesis_hash_for_network`.
 pub fn fixed_genesis_hash_for_network(network_name: &str) -> [u8; 32] {
-    let _ = network_name;
-    vdag_consensus::fixed_genesis_hash()
+    vdag_consensus::fixed_genesis_hash_for_network(resolve_network_id(network_name))
 }
 
 pub fn default_bootstrap_config(network_name: &str) -> BootstrapConfig {
@@ -180,5 +182,20 @@ mod tests {
         assert_eq!(loaded.seeds.len(), 1);
         assert!(loaded.verify_signature());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Regression test: `fixed_genesis_hash_for_network` previously
+    /// ignored the network name entirely and always returned devnet's
+    /// hash. Different network names must now resolve to different
+    /// genesis hashes.
+    #[test]
+    fn genesis_hash_for_network_actually_depends_on_the_network() {
+        let devnet = fixed_genesis_hash_for_network("devnet");
+        let testnet = fixed_genesis_hash_for_network("testnet");
+        let mainnet = fixed_genesis_hash_for_network("mainnet");
+
+        assert_ne!(devnet, testnet);
+        assert_ne!(devnet, mainnet);
+        assert_ne!(testnet, mainnet);
     }
 }
