@@ -3,6 +3,7 @@
 pub mod behaviour;
 pub mod difficulty_log;
 pub mod network;
+pub mod network_config;
 pub mod rpc;
 pub mod sync;
 pub mod wallet;
@@ -23,14 +24,16 @@ use libp2p::{
 };
 
 use vdag_consensus::{
-    daa::DifficultyManager, ghostdag::GhostdagManager, pow::PowManager, BlockHeader,
-    BlockchainStorage, LedgerState, Mempool, VeloBlock, DEV_TREASURY_ADDRESS,
+    daa::DifficultyManager, fixed_genesis_block, fixed_genesis_hash, ghostdag::GhostdagManager,
+    pow::PowManager, BlockHeader, BlockchainStorage, LedgerState, Mempool, VeloBlock,
+    DEV_TREASURY_ADDRESS,
 };
 use vdag_crypto::VeloKeyPair;
 
 use behaviour::{SyncBehaviour, VeloBehaviour};
 use difficulty_log::DifficultyLog;
 use network::GOSSIP_TOPIC;
+use network_config::{load_bootstrap_config, resolve_network_environment, resolve_network_id};
 use sync::OrphanPool;
 
 const IDENTITY_KEY_PATH: &str = "node_identity.key";
@@ -48,6 +51,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let storage_engine = BlockchainStorage::open();
+    let network_name = resolve_network_environment();
+    let network_id = resolve_network_id(&network_name);
+    info!(network = %network_name, network_id, "Using environment-specific network configuration");
 
     // 1. Process Explorer CLI Flags
     if args.len() > 2 && args[1] == "--get-block" {
@@ -100,13 +106,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
             .map_err(std::io::Error::other)?;
 
-            // Basic peer scoring: peers sending invalid/duplicate/spammy
-            // gossip get penalized and eventually graylisted automatically.
+            let mut peer_score_params = gossipsub::PeerScoreParams::default();
+            peer_score_params.topic_score_cap = 2048.0;
+            peer_score_params.app_specific_weight = 10.0;
+            peer_score_params.ip_colocation_factor_weight = -20.0;
+            peer_score_params.ip_colocation_factor_threshold = 2.0;
+            peer_score_params.behaviour_penalty_weight = -20.0;
+            peer_score_params.behaviour_penalty_threshold = 2.0;
+            peer_score_params.behaviour_penalty_decay = 0.2;
+            peer_score_params.decay_interval = Duration::from_secs(10);
+            peer_score_params.decay_to_zero = 0.1;
+            peer_score_params.retain_score = Duration::from_secs(1800);
+
+            let peer_score_thresholds = gossipsub::PeerScoreThresholds {
+                gossip_threshold: -10.0,
+                publish_threshold: -30.0,
+                graylist_threshold: -60.0,
+                accept_px_threshold: 15.0,
+                opportunistic_graft_threshold: 25.0,
+            };
+
+            // Stronger peer scoring: invalid/duplicate/spammy gossip is
+            // penalized early and eventually graylisted, which keeps public
+            // testnet nodes resilient against noisy or abusive peers.
             gossipsub
-                .with_peer_score(
-                    gossipsub::PeerScoreParams::default(),
-                    gossipsub::PeerScoreThresholds::default(),
-                )
+                .with_peer_score(peer_score_params, peer_score_thresholds)
                 .map_err(std::io::Error::other)?;
 
             let mdns =
@@ -136,9 +160,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Start listening on a randomized local TCP port interface
     swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
 
-    // Dial explicit --dial targets plus anything in bootstrap_peers.txt
-    // (one multiaddr per line, '#' comments allowed).
+    // Dial explicit --dial targets plus the resolved environment bootstrap list.
+    // Config is signed and network-aware so a node can reject stale or
+    // misconfigured bootstrap data before ever dialing a peer.
+    let bootstrap_config = load_bootstrap_config(&network_name)
+        .unwrap_or_else(|err| {
+            warn!(network = %network_name, error = %err, "Falling back to default bootstrap config");
+            network_config::default_bootstrap_config(&network_name)
+        });
+    info!(network = %network_name, network_id, seed_count = bootstrap_config.seeds.len(), "Loaded bootstrap configuration");
+
     let mut dial_targets = cli_dial_targets;
+    dial_targets.extend(bootstrap_config.seeds);
     dial_targets.extend(load_bootstrap_peers(BOOTSTRAP_FILE_PATH));
     for addr_str in dial_targets {
         match addr_str.parse::<Multiaddr>() {
@@ -165,7 +198,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // checked against the target that was actually in force then, not
     // whatever "current" happens to be by the time they're processed.
     let mut difficulty_log = DifficultyLog::new();
-    let genesis_hash = [0u8; 32];
+    let genesis_hash = fixed_genesis_hash();
     let persisted_ledger_state = match storage_engine.load_ledger_state() {
         Ok(state) => state,
         Err(e) => {
@@ -177,8 +210,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 4. Genesis Initialization Engine Check
     match storage_engine.load_block(&genesis_hash) {
         Ok(None) => {
-            info!("[🧱 Genesis Engine] Minting Genesis Block 0...");
-            let genesis_block = create_block(vec![], 0, [0u8; 32], 0, [0u8; 32], 0);
+            info!("[🧱 Genesis Engine] Minting Fixed Genesis Block 0...");
+            let genesis_block = fixed_genesis_block();
             ledger_state.apply_block(&genesis_block).unwrap();
             let genesis_dag_data = ghostdag.calculate_ghostdag_data(&genesis_block, genesis_hash);
 

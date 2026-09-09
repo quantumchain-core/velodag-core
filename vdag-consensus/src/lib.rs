@@ -12,6 +12,35 @@ pub const INITIAL_BLOCK_REWARD: u64 = 83_238;
 pub const DEV_TAX_PERCENTAGE: u64 = 5;
 pub const BLOCKS_PER_ERA: u64 = 126_144_000;
 pub const DEV_TREASURY_ADDRESS: [u8; 32] = [0xdd; 32];
+pub const DEVNET_NETWORK_ID: u64 = 1;
+pub const TESTNET_NETWORK_ID: u64 = 2;
+pub const MAINNET_NETWORK_ID: u64 = 3;
+pub const ACTIVE_NETWORK_ID: u64 = DEVNET_NETWORK_ID;
+
+/// Immutable protocol-freeze: every node on the same network must agree on
+/// the same canonical genesis block and network ID before any sync/gossip
+/// traffic is accepted.
+pub fn fixed_genesis_block() -> VeloBlock {
+    VeloBlock {
+        header: BlockHeader {
+            timestamp: 1_700_000_000,
+            parents: vec![],
+            tx_merkle_root: [0u8; 32],
+            nonce: 0,
+            height: 0,
+            difficulty_target: [0x0f; 32],
+        },
+        transactions: vec![],
+        coinbase_miner_address: [0u8; 32],
+        coinbase_miner_output: 0,
+        coinbase_dev_address: DEV_TREASURY_ADDRESS,
+        coinbase_dev_output: 0,
+    }
+}
+
+pub fn fixed_genesis_hash() -> [u8; 32] {
+    fixed_genesis_block().calculate_hash()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlockHeader {
@@ -506,5 +535,18 @@ mod consensus_tests {
             .apply_block(&wrong_nonce_block)
             .unwrap_err()
             .contains("invalid nonce"));
+    }
+
+    #[test]
+    fn fixed_genesis_and_network_identity_are_stable() {
+        assert_eq!(DEVNET_NETWORK_ID, 1);
+        assert_eq!(TESTNET_NETWORK_ID, 2);
+        assert_eq!(MAINNET_NETWORK_ID, 3);
+
+        let genesis = fixed_genesis_block();
+        assert_eq!(genesis.header.height, 0);
+        assert!(genesis.header.parents.is_empty());
+        assert_eq!(fixed_genesis_hash(), genesis.calculate_hash());
+        assert_ne!(fixed_genesis_hash(), [0u8; 32]);
     }
 }

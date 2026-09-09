@@ -92,10 +92,12 @@ This tracker describes the current repository state. A feature is marked done on
 
 ### Networking security
 
-- [ ] Add stable public seed nodes and signed bootstrap configuration.
+- [x] Add environment-aware seed bootstrap configuration and signed bootstrap validation.
+- [x] Add peer scoring policy and abuse controls for noisy or malicious peers.
+- [ ] Add stable public seed nodes and operator-run bootstrap policy.
 - [ ] Add peer connection limits and inbound/outbound rate limits.
 - [ ] Add message and sync request abuse protection.
-- [ ] Add peer banning, scoring policy, and recovery behavior.
+- [ ] Add peer banning and recovery behavior.
 - [ ] Add NAT traversal or relay support for nodes behind private networks.
 - [ ] Test partitions, delayed peers, duplicate messages, malformed payloads, and long sync gaps.
 

@@ -26,6 +26,8 @@ pub const MAX_SYNC_BLOCKS: usize = 500;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncRequest {
+    /// Stable network ID check: nodes on different networks must never sync.
+    pub network_id: u64,
     /// Acts as a network-magic check -- peers on a different genesis are
     /// rejected rather than silently corrupting our DAG.
     pub genesis_hash: [u8; 32],

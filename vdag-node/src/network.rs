@@ -128,6 +128,7 @@ pub fn handle_p2p_events(
             swarm.behaviour_mut().sync.send_request(
                 &peer_id,
                 SyncRequest {
+                    network_id: vdag_consensus::ACTIVE_NETWORK_ID,
                     genesis_hash,
                     since_height,
                 },
@@ -323,8 +324,12 @@ fn build_sync_response(
     genesis_hash: [u8; 32],
     block_history: &[VeloBlock],
 ) -> SyncResponse {
-    if request.genesis_hash != genesis_hash {
-        warn!("Peer requested sync with a different genesis -- refusing");
+    if request.network_id != vdag_consensus::ACTIVE_NETWORK_ID || request.genesis_hash != genesis_hash {
+        warn!(
+            requested_network = request.network_id,
+            local_network = vdag_consensus::ACTIVE_NETWORK_ID,
+            "Peer requested sync on a different network or genesis -- refusing"
+        );
         return SyncResponse::GenesisMismatch;
     }
 
