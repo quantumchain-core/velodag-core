@@ -16,6 +16,7 @@
 // against its own say-so.
 
 use std::error::Error;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use libp2p::{gossipsub, gossipsub::IdentTopic, mdns, request_response, swarm::SwarmEvent, Swarm};
 use tracing::{info, warn};
@@ -32,6 +33,16 @@ use crate::sync::{OrphanPool, SyncRequest, SyncResponse, MAX_SYNC_BLOCKS};
 /// Shared gossip topic name -- imported by main.rs too, so there's a single
 /// source of truth instead of the string being duplicated across files.
 pub const GOSSIP_TOPIC: &str = "vdag-blocks";
+
+/// Hard caps protecting against a malicious or broken peer forcing
+/// excessive memory/CPU use with an oversized payload, a block stuffed
+/// with more transactions than could plausibly be legitimate, or a
+/// timestamp claiming to be far in the future (which would otherwise let
+/// a peer manipulate difficulty in future windows -- the same class of
+/// problem as the DAA overflow bug, approached from a different angle).
+const MAX_GOSSIP_MESSAGE_BYTES: usize = 2 * 1024 * 1024; // 2 MB
+const MAX_TRANSACTIONS_PER_BLOCK: usize = 5_000;
+const MAX_FUTURE_DRIFT_SECS: u64 = 30;
 
 /// Top-level dispatcher for every swarm event. Called once per event from
 /// the main select! loop.
@@ -168,6 +179,18 @@ fn handle_gossip_block(
         return Ok(());
     }
 
+    // Reject oversized payloads before spending any CPU on deserialization
+    // -- the whole point of this check is to fail cheaply, before the
+    // expensive part.
+    if message.data.len() > MAX_GOSSIP_MESSAGE_BYTES {
+        warn!(
+            size = message.data.len(),
+            max = MAX_GOSSIP_MESSAGE_BYTES,
+            "Dropped oversized gossip payload from peer"
+        );
+        return Ok(());
+    }
+
     let incoming_block: VeloBlock = match bincode::deserialize(&message.data) {
         Ok(b) => b,
         Err(_) => {
@@ -221,6 +244,18 @@ fn validate_and_ingest(
 
     if storage.load_block(&hash)?.is_some() {
         return Ok(()); // already known, nothing to do
+    }
+
+    // Cheapest check first: reject a block stuffed with an implausible
+    // number of transactions before doing any real validation work on it.
+    if block.transactions.len() > MAX_TRANSACTIONS_PER_BLOCK {
+        warn!(
+            height = block.header.height,
+            tx_count = block.transactions.len(),
+            max = MAX_TRANSACTIONS_PER_BLOCK,
+            "Rejected block: too many transactions"
+        );
+        return Ok(());
     }
 
     // 1. Coinbase / dev-tax split must match consensus rules exactly.
@@ -283,15 +318,87 @@ fn validate_and_ingest(
         difficulty_log.record(block.header.height, expected_target);
     }
 
-    // 3. Every parent must already be known locally, or this block gets
-    //    parked as an orphan until the missing parent arrives.
+    // 3. Every parent must already be known locally (orphaning this block
+    //    if not), and once parents are confirmed known: height must be
+    //    exactly one more than the tallest parent (no gaps, no claiming a
+    //    height that doesn't follow from the DAG), and timestamp must not
+    //    precede the tallest parent's timestamp nor claim to be from more
+    //    than MAX_FUTURE_DRIFT_SECS in the future. The future-drift check
+    //    matters beyond plausibility: an implausible timestamp is exactly
+    //    the kind of input that previously broke the DAA's difficulty
+    //    calculation (see the overflow fix in daa.rs) -- rejecting it here
+    //    stops a manipulated timestamp from ever reaching that math.
+    let mut max_parent_height: Option<u64> = None;
+    let mut max_parent_timestamp: Option<u64> = None;
     for parent in &block.header.parents {
-        if !ghostdag.block_store.contains_key(parent) {
-            info!(
+        match ghostdag.block_store.get(parent) {
+            Some(parent_block) => {
+                max_parent_height = Some(
+                    max_parent_height.map_or(parent_block.header.height, |h| {
+                        h.max(parent_block.header.height)
+                    }),
+                );
+                max_parent_timestamp = Some(
+                    max_parent_timestamp.map_or(parent_block.header.timestamp, |t| {
+                        t.max(parent_block.header.timestamp)
+                    }),
+                );
+            }
+            None => {
+                info!(
+                    height = block.header.height,
+                    "Missing parent, buffering as orphan"
+                );
+                orphans.insert(*parent, block);
+                return Ok(());
+            }
+        }
+    }
+
+    if block.header.height == 0 {
+        if !block.header.parents.is_empty() {
+            warn!("Rejected block: height 0 must have no parents");
+            return Ok(());
+        }
+    } else {
+        if block.header.parents.is_empty() {
+            warn!(
                 height = block.header.height,
-                "Missing parent, buffering as orphan"
+                "Rejected block: non-genesis block has no parents"
             );
-            orphans.insert(*parent, block);
+            return Ok(());
+        }
+
+        let expected_height = max_parent_height.unwrap() + 1;
+        if block.header.height != expected_height {
+            warn!(
+                height = block.header.height,
+                expected_height, "Rejected block: height is not parent height + 1"
+            );
+            return Ok(());
+        }
+
+        if let Some(parent_ts) = max_parent_timestamp {
+            if block.header.timestamp < parent_ts {
+                warn!(
+                    height = block.header.height,
+                    "Rejected block: timestamp precedes its parent's timestamp"
+                );
+                return Ok(());
+            }
+        }
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if block.header.timestamp > now.saturating_add(MAX_FUTURE_DRIFT_SECS) {
+            warn!(
+                height = block.header.height,
+                timestamp = block.header.timestamp,
+                now,
+                "Rejected block: timestamp too far in the future"
+            );
             return Ok(());
         }
     }
