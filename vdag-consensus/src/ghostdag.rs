@@ -193,8 +193,7 @@ impl GhostdagManager {
     }
 
     /// DETERMINISTIC ORDERING ENGINE: Flattens the DAG graph into a single execution stream
-    pub fn get_linear_sort(&self, tip_hash: &BlockHash) -> Vec<BlockHash> {
-        let mut order = Vec::new();
+    pub fn get_linear_sort(&self, tip_hash: &BlockHash) -> Vec<BlockHash> {        let mut order = Vec::new();
         let mut current = Some(*tip_hash);
 
         // Follow the selected parent path back to Genesis, collecting branches deterministically
@@ -220,6 +219,53 @@ impl GhostdagManager {
         }
         order.reverse(); // Reverse to read from Genesis onwards
         order
+    }
+
+    /// Computes the current set of tips: blocks known locally that are not
+    /// listed as a parent by any other known block. In today's
+    /// single-parent-per-block mining model this is usually exactly one
+    /// block, but the function handles a true multi-tip fork correctly,
+    /// which is the entire point of doing fork choice at all -- a fork
+    /// only exists when there's more than one tip to choose between.
+    pub fn compute_tips(&self) -> Vec<BlockHash> {
+        let referenced_as_parent: HashSet<BlockHash> = self
+            .block_store
+            .values()
+            .flat_map(|b| b.header.parents.iter().copied())
+            .collect();
+
+        self.block_store
+            .keys()
+            .filter(|hash| !referenced_as_parent.contains(*hash))
+            .copied()
+            .collect()
+    }
+
+    /// GHOSTDAG fork-choice rule: among a set of candidate tips, the one
+    /// with the highest blue_score wins -- the "heaviest" / most-blue
+    /// subDAG is canonical. Ties are broken by lowest hash bytes so every
+    /// honest node given the same candidate set reaches the identical
+    /// decision; fork choice that isn't fully deterministic means nodes
+    /// can permanently disagree about which chain is canonical.
+    pub fn select_best_tip(&self, candidates: &[BlockHash]) -> Option<BlockHash> {
+        candidates
+            .iter()
+            .filter_map(|hash| {
+                self.ghostdag_cache
+                    .get(hash)
+                    .map(|data| (*hash, data.blue_score))
+            })
+            .max_by(|(hash_a, score_a), (hash_b, score_b)| {
+                score_a.cmp(score_b).then_with(|| hash_b.cmp(hash_a))
+            })
+            .map(|(hash, _)| hash)
+    }
+
+    /// Convenience: computes the current tip set and selects the canonical
+    /// one via `select_best_tip`. Returns `None` only if there are no
+    /// blocks at all locally (shouldn't happen once genesis is loaded).
+    pub fn select_canonical_tip(&self) -> Option<BlockHash> {
+        self.select_best_tip(&self.compute_tips())
     }
 }
 
@@ -255,5 +301,87 @@ mod tests {
         let result = manager.calculate_ghostdag_data(&genesis_block, genesis_hash);
         assert_eq!(result.blue_score, 0);
         assert!(result.selected_parent.is_none());
+    }
+
+    /// Regression test for real fork choice: given two competing branches
+    /// off the same genesis, the branch with more blocks (and therefore a
+    /// higher blue_score) must be selected as canonical -- not whichever
+    /// branch happens to be passed first, and not whichever arrived most
+    /// recently. This is the actual behavior that was missing before: the
+    /// coloring math existed, but nothing used it to pick a winner.
+    #[test]
+    fn fork_choice_selects_the_heavier_branch() {
+        let mut manager = GhostdagManager::new(3);
+
+        let genesis_hash = [0u8; 32];
+        let genesis = create_mock_block(vec![]);
+        let genesis_data = manager.calculate_ghostdag_data(&genesis, genesis_hash);
+        manager.block_store.insert(genesis_hash, genesis);
+        manager.ghostdag_cache.insert(genesis_hash, genesis_data);
+
+        // Branch A: a single block off genesis.
+        let a1 = create_mock_block(vec![genesis_hash]);
+        let a1_hash = [1u8; 32];
+        let a1_data = manager.calculate_ghostdag_data(&a1, a1_hash);
+        manager.block_store.insert(a1_hash, a1);
+        manager.ghostdag_cache.insert(a1_hash, a1_data);
+
+        // Branch B: two blocks off genesis -- strictly heavier than A.
+        let b1 = create_mock_block(vec![genesis_hash]);
+        let b1_hash = [2u8; 32];
+        let b1_data = manager.calculate_ghostdag_data(&b1, b1_hash);
+        manager.block_store.insert(b1_hash, b1);
+        manager.ghostdag_cache.insert(b1_hash, b1_data);
+
+        let b2 = create_mock_block(vec![b1_hash]);
+        let b2_hash = [3u8; 32];
+        let b2_data = manager.calculate_ghostdag_data(&b2, b2_hash);
+        manager.block_store.insert(b2_hash, b2);
+        manager.ghostdag_cache.insert(b2_hash, b2_data);
+
+        // compute_tips must find exactly the two real tips (a1 and b2),
+        // not genesis or b1 (both of which are now someone's parent).
+        let mut tips = manager.compute_tips();
+        tips.sort();
+        let mut expected = vec![a1_hash, b2_hash];
+        expected.sort();
+        assert_eq!(tips, expected);
+
+        // Fork choice must pick b2 (the heavier branch), regardless of
+        // candidate ordering passed in.
+        assert_eq!(manager.select_best_tip(&[a1_hash, b2_hash]), Some(b2_hash));
+        assert_eq!(manager.select_best_tip(&[b2_hash, a1_hash]), Some(b2_hash));
+        assert_eq!(manager.select_canonical_tip(), Some(b2_hash));
+    }
+
+    /// Regression test: when two tips have the identical blue_score (a
+    /// genuine tie), selection must be deterministic -- every node must
+    /// reach the same decision given the same tips, or the network can
+    /// permanently fork on the tie-break alone.
+    #[test]
+    fn fork_choice_tie_break_is_deterministic() {
+        let mut manager = GhostdagManager::new(3);
+        let genesis_hash = [0u8; 32];
+        let genesis = create_mock_block(vec![]);
+        let genesis_data = manager.calculate_ghostdag_data(&genesis, genesis_hash);
+        manager.block_store.insert(genesis_hash, genesis);
+        manager.ghostdag_cache.insert(genesis_hash, genesis_data);
+
+        // Two single-block branches off genesis: identical blue_score.
+        let a1 = create_mock_block(vec![genesis_hash]);
+        let a1_hash = [5u8; 32];
+        let a1_data = manager.calculate_ghostdag_data(&a1, a1_hash);
+        manager.block_store.insert(a1_hash, a1);
+        manager.ghostdag_cache.insert(a1_hash, a1_data);
+
+        let b1 = create_mock_block(vec![genesis_hash]);
+        let b1_hash = [9u8; 32];
+        let b1_data = manager.calculate_ghostdag_data(&b1, b1_hash);
+        manager.block_store.insert(b1_hash, b1);
+        manager.ghostdag_cache.insert(b1_hash, b1_data);
+
+        // Lower hash ([5;32] < [9;32]) must win regardless of argument order.
+        assert_eq!(manager.select_best_tip(&[a1_hash, b1_hash]), Some(a1_hash));
+        assert_eq!(manager.select_best_tip(&[b1_hash, a1_hash]), Some(a1_hash));
     }
 }
