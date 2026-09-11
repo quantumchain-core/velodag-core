@@ -2,6 +2,9 @@ pub mod daa;
 pub mod ghostdag;
 pub mod pow;
 
+#[cfg(test)]
+mod test_vectors;
+
 use ghostdag::GhostdagData;
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
