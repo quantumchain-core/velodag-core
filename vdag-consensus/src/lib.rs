@@ -12,6 +12,11 @@ pub const INITIAL_BLOCK_REWARD: u64 = 83_238;
 pub const DEV_TAX_PERCENTAGE: u64 = 5;
 pub const BLOCKS_PER_ERA: u64 = 126_144_000;
 pub const DEV_TREASURY_ADDRESS: [u8; 32] = [0xdd; 32];
+/// Flat, protocol-fixed fee charged on every non-genesis transaction, in
+/// base units (0.0001 VDAG at the existing 1,000,000-base-unit
+/// denomination). Not a percentage, not user-chosen. See
+/// VeloDAG_Fee_Burn_Spec.md for the full reasoning and the burn split.
+pub const TRANSACTION_FEE: u64 = 100;
 pub const DEVNET_NETWORK_ID: u64 = 1;
 pub const TESTNET_NETWORK_ID: u64 = 2;
 pub const MAINNET_NETWORK_ID: u64 = 3;
@@ -195,10 +200,29 @@ impl VeloBlock {
             return (0, 0);
         }
 
-        let dev_share = (total_subsidy * DEV_TAX_PERCENTAGE) / 100;
-        let miner_share = total_subsidy - dev_share;
+        Self::apply_dev_tax_split(total_subsidy)
+    }
 
+    /// Shared 95/5 split math -- the single source of truth for the dev
+    /// tax ratio, used both by the block reward (above) and by transaction
+    /// fee distribution (`fee_distribution`, below). One ratio, one place
+    /// it's defined, so the two can't silently drift apart from each other.
+    fn apply_dev_tax_split(amount: u64) -> (u64, u64) {
+        let dev_share = (amount * DEV_TAX_PERCENTAGE) / 100;
+        let miner_share = amount - dev_share;
         (miner_share, dev_share)
+    }
+
+    /// Splits the fixed per-transaction fee into (miner_share, dev_share,
+    /// burned_share). Half the fee is burned outright -- credited to
+    /// nobody, simply subtracted from the sender and never re-added
+    /// anywhere. The other half follows the same 95/5 ratio as the block
+    /// reward. See VeloDAG_Fee_Burn_Spec.md for the reasoning.
+    pub fn fee_distribution() -> (u64, u64, u64) {
+        let burn_share = TRANSACTION_FEE / 2;
+        let distributed_share = TRANSACTION_FEE - burn_share;
+        let (miner_share, dev_share) = Self::apply_dev_tax_split(distributed_share);
+        (miner_share, dev_share, burn_share)
     }
 
     /// Strict protocol gatekeeper. Validates that the block rewards perfectly match consensus rules.
@@ -265,9 +289,13 @@ impl LedgerState {
             }
 
             let sender_balance = balances.get(&tx.sender).copied().unwrap_or(0);
+            let total_cost = tx
+                .amount
+                .checked_add(TRANSACTION_FEE)
+                .ok_or_else(|| "transaction cost overflow".to_string())?;
             let remaining = sender_balance
-                .checked_sub(tx.amount)
-                .ok_or_else(|| "insufficient balance".to_string())?;
+                .checked_sub(total_cost)
+                .ok_or_else(|| "insufficient balance for amount plus fee".to_string())?;
             balances.insert(tx.sender, remaining);
             let recipient_balance = balances.get(&tx.recipient).copied().unwrap_or(0);
             balances.insert(
@@ -276,6 +304,26 @@ impl LedgerState {
                     .checked_add(tx.amount)
                     .ok_or_else(|| "recipient balance overflow".to_string())?,
             );
+
+            // Fee distribution: half burned (credited to nobody, simply
+            // gone), the other half split via the same 95/5 ratio as the
+            // block reward. See VeloDAG_Fee_Burn_Spec.md.
+            let (fee_miner_share, fee_dev_share, _fee_burned_share) = VeloBlock::fee_distribution();
+            let miner_fee_balance = balances.get(&block.coinbase_miner_address).copied().unwrap_or(0);
+            balances.insert(
+                block.coinbase_miner_address,
+                miner_fee_balance
+                    .checked_add(fee_miner_share)
+                    .ok_or_else(|| "miner fee balance overflow".to_string())?,
+            );
+            let dev_fee_balance = balances.get(&block.coinbase_dev_address).copied().unwrap_or(0);
+            balances.insert(
+                block.coinbase_dev_address,
+                dev_fee_balance
+                    .checked_add(fee_dev_share)
+                    .ok_or_else(|| "treasury fee balance overflow".to_string())?,
+            );
+
             next_nonces.insert(tx.sender, expected_nonce + 1);
         }
 
@@ -541,10 +589,15 @@ mod consensus_tests {
         state.apply_block(&reward_block).unwrap();
         assert_eq!(state.balance(&miner), miner_reward);
 
+        let (fee_miner_share, fee_dev_share, fee_burned_share) = VeloBlock::fee_distribution();
+        assert_eq!(fee_miner_share + fee_dev_share + fee_burned_share, TRANSACTION_FEE);
+
+        // Sender must leave exactly enough room for amount + fee.
+        let send_amount = miner_reward - TRANSACTION_FEE;
         let tx = Transaction {
             sender: miner,
             recipient,
-            amount: miner_reward,
+            amount: send_amount,
             nonce: 0,
             public_key: vec![],
             signature: vec![],
@@ -566,8 +619,11 @@ mod consensus_tests {
             coinbase_dev_output: next_dev_reward,
         };
         state.apply_block(&spend_block).unwrap();
-        assert_eq!(state.balance(&miner), next_miner_reward);
-        assert_eq!(state.balance(&recipient), miner_reward);
+        // miner pays amount+fee (draining to 0 pre-coinbase), then receives
+        // this block's reward PLUS their own cut of the fee they just paid
+        // (they're also this block's miner).
+        assert_eq!(state.balance(&miner), next_miner_reward + fee_miner_share);
+        assert_eq!(state.balance(&recipient), send_amount);
         assert!(state.apply_block(&spend_block).is_err());
 
         let mut wrong_nonce_block = spend_block.clone();
@@ -578,6 +634,83 @@ mod consensus_tests {
             .apply_block(&wrong_nonce_block)
             .unwrap_err()
             .contains("invalid nonce"));
+    }
+
+    /// Regression test dedicated to the fee/burn mechanism itself, with
+    /// sender, miner, and treasury all kept as distinct addresses so the
+    /// three-way split is unambiguous to verify (unlike the test above,
+    /// where the sender and miner happen to be the same address).
+    #[test]
+    fn transaction_fee_is_charged_split_and_partially_burned() {
+        let sender = [11u8; 32];
+        let miner = [22u8; 32];
+        let recipient = [33u8; 32];
+
+        let mut state = LedgerState::default();
+        let (miner_reward, dev_reward) = VeloBlock::calculate_subsidy_split(1);
+        let fund_block = VeloBlock {
+            header: BlockHeader {
+                timestamp: 1,
+                parents: vec![[0u8; 32]],
+                tx_merkle_root: [0u8; 32],
+                nonce: 0,
+                height: 1,
+                difficulty_target: [0xff; 32],
+            },
+            transactions: vec![],
+            coinbase_miner_address: sender, // fund the sender via a block reward first
+            coinbase_miner_output: miner_reward,
+            coinbase_dev_address: DEV_TREASURY_ADDRESS,
+            coinbase_dev_output: dev_reward,
+        };
+        state.apply_block(&fund_block).unwrap();
+        let starting_balance = state.balance(&sender);
+
+        let send_amount = 1_000u64;
+        let tx = Transaction {
+            sender,
+            recipient,
+            amount: send_amount,
+            nonce: 0,
+            public_key: vec![],
+            signature: vec![],
+        };
+        let (next_miner_reward, next_dev_reward) = VeloBlock::calculate_subsidy_split(2);
+        let spend_block = VeloBlock {
+            header: BlockHeader {
+                timestamp: 2,
+                parents: vec![fund_block.calculate_hash()],
+                tx_merkle_root: VeloBlock::transaction_merkle_root(std::slice::from_ref(&tx)),
+                nonce: 0,
+                height: 2,
+                difficulty_target: [0xff; 32],
+            },
+            transactions: vec![tx],
+            coinbase_miner_address: miner,
+            coinbase_miner_output: next_miner_reward,
+            coinbase_dev_address: DEV_TREASURY_ADDRESS,
+            coinbase_dev_output: next_dev_reward,
+        };
+        state.apply_block(&spend_block).unwrap();
+
+        let (fee_miner_share, fee_dev_share, fee_burned_share) = VeloBlock::fee_distribution();
+
+        // Sender paid amount + full fee, distinct from both miner and recipient.
+        assert_eq!(
+            state.balance(&sender),
+            starting_balance - send_amount - TRANSACTION_FEE
+        );
+        // Recipient got exactly the amount -- fee is additional, not deducted from the transfer.
+        assert_eq!(state.balance(&recipient), send_amount);
+        // Miner got the block reward plus their fee share -- nothing more.
+        assert_eq!(state.balance(&miner), next_miner_reward + fee_miner_share);
+        // Treasury got the block reward's dev share plus the fee's dev share.
+        assert_eq!(state.balance(&DEV_TREASURY_ADDRESS), dev_reward + next_dev_reward + fee_dev_share);
+        // The burned share was credited to nobody: total credited across
+        // sender/recipient/miner/treasury is less than what the sender
+        // paid, by exactly the burned amount.
+        assert_eq!(fee_miner_share + fee_dev_share + fee_burned_share, TRANSACTION_FEE);
+        assert!(fee_burned_share > 0);
     }
 
     #[test]
