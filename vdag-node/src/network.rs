@@ -414,13 +414,30 @@ fn validate_and_ingest(
 
     let ingested_hash = ingest_block_only(block, storage, ghostdag, block_history)?;
 
-    // Advance the shared expected-target state the same way the local
-    // mining loop does, using the now-extended block_history. This keeps
-    // validation and mining following the identical DAA progression --
-    // whether the next block comes from this node's own miner or from a
-    // peer, both are checked against the same expected value.
+    // Ledger authority: recompute from the canonical chain rather than
+    // trusting the incremental apply_block call above, which only reflects
+    // arrival order. The apply_block call above remains useful as a cheap
+    // pre-admission filter (reject obviously-bad blocks before they're even
+    // ingested), but what actually gets persisted and relied upon from here
+    // on is derived fresh from get_linear_sort of the real canonical tip --
+    // not from "whatever order blocks were processed in."
+    let canonical_tip_after = ghostdag.select_canonical_tip().unwrap_or(ingested_hash);
+    match ghostdag.recompute_ledger(&canonical_tip_after) {
+        Ok(recomputed) => {
+            *ledger_state = recomputed;
+            if let Err(reason) = storage.save_ledger_state(ledger_state) {
+                warn!(%reason, "Failed to persist recomputed ledger state");
+            }
+        }
+        Err(reason) => {
+            warn!(%reason, "Ledger recompute failed after ingesting an already-validated block -- this indicates a consistency bug, not a normal rejection");
+        }
+    }
+
+    // Difficulty: same fix, canonical order instead of arrival order.
+    let canonical_blocks = ghostdag.canonical_block_order(&canonical_tip_after);
     *current_difficulty_target =
-        difficulty_manager.calculate_next_target(block_history, *current_difficulty_target);
+        difficulty_manager.calculate_next_target(&canonical_blocks, *current_difficulty_target);
 
     // A block landing may unblock orphans that were waiting specifically on
     // it. They go back through this same validate_and_ingest path, so
