@@ -1,6 +1,6 @@
 // vdag-consensus/src/ghostdag.rs
 
-use crate::VeloBlock;
+use crate::{LedgerState, VeloBlock};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -267,6 +267,49 @@ impl GhostdagManager {
     pub fn select_canonical_tip(&self) -> Option<BlockHash> {
         self.select_best_tip(&self.compute_tips())
     }
+
+    /// Recomputes ledger state from scratch by replaying every block in
+    /// `tip`'s canonical linear order (`get_linear_sort`), rather than
+    /// trusting whatever order blocks happened to be applied in as they
+    /// arrived.
+    ///
+    /// This closes a real gap: ledger balances were previously a function
+    /// of arrival order (whichever order blocks were processed in), not of
+    /// the canonical chain -- meaning two honest nodes that saw the exact
+    /// same set of blocks in a different order could, in principle, end up
+    /// disagreeing about balances even though they agree on which blocks
+    /// exist. Replaying via `get_linear_sort` guarantees every node
+    /// converges to the identical ledger given the identical DAG,
+    /// regardless of arrival order.
+    ///
+    /// Known limitation, intentionally not solved here: this replays from
+    /// genesis every time it's called, which is fine at testnet scale but
+    /// becomes an O(chain length) cost per new block as the chain grows.
+    /// Checkpointing / incremental recomputation is a real optimization to
+    /// revisit before this needs to handle a long-running mainnet chain --
+    /// correctness first, performance once correctness is proven.
+    pub fn recompute_ledger(&self, tip: &BlockHash) -> Result<LedgerState, String> {
+        let mut ledger = LedgerState::default();
+        for hash in self.get_linear_sort(tip) {
+            let block = self
+                .block_store
+                .get(&hash)
+                .ok_or_else(|| format!("missing block {hash:02x?} during ledger replay"))?;
+            ledger.apply_block(block)?;
+        }
+        Ok(ledger)
+    }
+
+    /// Returns the canonical linear order as actual block data (not just
+    /// hashes) -- for consumers like difficulty adjustment that need real
+    /// block contents in canonical order rather than arrival order. Same
+    /// motivation and same performance caveat as `recompute_ledger`.
+    pub fn canonical_block_order(&self, tip: &BlockHash) -> Vec<VeloBlock> {
+        self.get_linear_sort(tip)
+            .iter()
+            .filter_map(|hash| self.block_store.get(hash).cloned())
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -383,5 +426,56 @@ mod tests {
         // Lower hash ([5;32] < [9;32]) must win regardless of argument order.
         assert_eq!(manager.select_best_tip(&[a1_hash, b1_hash]), Some(a1_hash));
         assert_eq!(manager.select_best_tip(&[b1_hash, a1_hash]), Some(a1_hash));
+    }
+
+    /// Regression test: ledger balances must come from replaying the
+    /// canonical linear order (genesis -> b1 -> b2), accumulating coinbase
+    /// rewards correctly along the way -- not from however blocks happened
+    /// to be inserted into the store. This is the actual property that was
+    /// missing before recompute_ledger existed: the authoritative ledger
+    /// is now a pure function of the DAG's canonical chain.
+    #[test]
+    fn recompute_ledger_matches_canonical_replay() {
+        let mut manager = GhostdagManager::new(3);
+
+        let genesis_hash = [0u8; 32];
+        let genesis = create_mock_block(vec![]);
+        let genesis_data = manager.calculate_ghostdag_data(&genesis, genesis_hash);
+        manager.block_store.insert(genesis_hash, genesis);
+        manager.ghostdag_cache.insert(genesis_hash, genesis_data);
+
+        let miner = [7u8; 32];
+        let dev = crate::DEV_TREASURY_ADDRESS;
+
+        let mut b1 = create_mock_block(vec![genesis_hash]);
+        b1.header.height = 1;
+        let (miner_reward_1, dev_reward_1) = VeloBlock::calculate_subsidy_split(1);
+        b1.coinbase_miner_address = miner;
+        b1.coinbase_miner_output = miner_reward_1;
+        b1.coinbase_dev_address = dev;
+        b1.coinbase_dev_output = dev_reward_1;
+        let b1_hash = [1u8; 32];
+        let b1_data = manager.calculate_ghostdag_data(&b1, b1_hash);
+        manager.block_store.insert(b1_hash, b1);
+        manager.ghostdag_cache.insert(b1_hash, b1_data);
+
+        let mut b2 = create_mock_block(vec![b1_hash]);
+        b2.header.height = 2;
+        let (miner_reward_2, dev_reward_2) = VeloBlock::calculate_subsidy_split(2);
+        b2.coinbase_miner_address = miner;
+        b2.coinbase_miner_output = miner_reward_2;
+        b2.coinbase_dev_address = dev;
+        b2.coinbase_dev_output = dev_reward_2;
+        let b2_hash = [2u8; 32];
+        let b2_data = manager.calculate_ghostdag_data(&b2, b2_hash);
+        manager.block_store.insert(b2_hash, b2);
+        manager.ghostdag_cache.insert(b2_hash, b2_data);
+
+        let ledger = manager
+            .recompute_ledger(&b2_hash)
+            .expect("replay should succeed for a valid canonical chain");
+
+        assert_eq!(ledger.balance(&miner), miner_reward_1 + miner_reward_2);
+        assert_eq!(ledger.balance(&dev), dev_reward_1 + dev_reward_2);
     }
 }
