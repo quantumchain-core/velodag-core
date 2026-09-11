@@ -288,24 +288,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let node_mempool = Arc::new(Mutex::new(Mempool::new()));
     let rpc_address = env::var("VDAG_RPC_ADDR").unwrap_or_else(|_| "127.0.0.1:8545".into());
     tokio::spawn(rpc::serve(rpc_address, Arc::clone(&node_mempool)));
-    let mut current_tips = block_history
-        .last()
-        .map(|block| {
-            if block.header.height == 0 {
-                vec![genesis_hash]
-            } else {
-                vec![block.calculate_hash()]
-            }
-        })
-        .unwrap_or_else(|| vec![genesis_hash]);
-    let mut block_height = block_history
-        .iter()
-        .map(|block| block.header.height)
-        .max()
-        .unwrap_or(0);
     if let Some(last_block) = block_history.last() {
         current_difficulty_target = last_block.header.difficulty_target;
     }
+    let mut block_height: u64 = 0; // overwritten every tick from the selected tip's height -- see below
     let mut sync_pending = false;
     let mut block_timer = interval_at(
         Instant::now() + Duration::from_secs(2),
@@ -316,7 +302,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     loop {
         tokio::select! {
             _ = block_timer.tick(), if !sync_pending => {
-                block_height += 1;
+                // Fork choice, recomputed fresh every tick: build on the
+                // heaviest (highest blue_score) tip known right now, not
+                // whichever block happened to be processed most recently.
+                // This is what makes tip selection actually GHOSTDAG-aware
+                // instead of just "whatever arrived last" -- if a gossiped
+                // block created a heavier competing branch since the last
+                // tick, mining follows it rather than a stale local view.
+                let selected_tip = ghostdag.select_canonical_tip().unwrap_or(genesis_hash);
+                let tip_height = ghostdag
+                    .block_store
+                    .get(&selected_tip)
+                    .map(|b| b.header.height)
+                    .unwrap_or(0);
+                let current_tips = vec![selected_tip];
+                block_height = tip_height + 1;
 
                 let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
                 let (miner_reward, dev_reward) = VeloBlock::calculate_subsidy_split(block_height);
@@ -371,8 +371,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
 
+                    // NOTE: still advances difficulty using block_history's raw
+                    // arrival order, not ghostdag.get_linear_sort's canonical
+                    // order -- same for ledger_state.apply_block above. Tip
+                    // *selection* is now fork-choice-aware; ledger and
+                    // difficulty ordering under a real fork are a separate,
+                    // larger gap tracked for a follow-up round.
                     current_difficulty_target = difficulty_manager.calculate_next_target(&block_history, current_difficulty_target);
-                    current_tips = vec![block_hash];
                 }
             }
 
