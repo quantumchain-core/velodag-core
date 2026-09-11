@@ -371,13 +371,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
 
-                    // NOTE: still advances difficulty using block_history's raw
-                    // arrival order, not ghostdag.get_linear_sort's canonical
-                    // order -- same for ledger_state.apply_block above. Tip
-                    // *selection* is now fork-choice-aware; ledger and
-                    // difficulty ordering under a real fork are a separate,
-                    // larger gap tracked for a follow-up round.
-                    current_difficulty_target = difficulty_manager.calculate_next_target(&block_history, current_difficulty_target);
+                    // Ledger authority: recompute from the canonical chain
+                    // rather than trusting the incremental apply_block call
+                    // earlier in this tick, which only reflected arrival
+                    // order. This is what actually closes the ordering gap
+                    // flagged in the previous round -- the ledger that gets
+                    // persisted and used for future mining/RPC queries is
+                    // now always derived from get_linear_sort of the real
+                    // canonical tip, not from "whatever order blocks were
+                    // processed in."
+                    let canonical_tip_after = ghostdag.select_canonical_tip().unwrap_or(block_hash);
+                    match ghostdag.recompute_ledger(&canonical_tip_after) {
+                        Ok(recomputed) => {
+                            ledger_state = recomputed;
+                            if let Err(reason) = storage_engine.save_ledger_state(&ledger_state) {
+                                error!(%reason, "Failed to persist recomputed ledger state");
+                            }
+                        }
+                        Err(reason) => {
+                            error!(%reason, "Ledger recompute failed after mining a block that was already validated -- this indicates a consistency bug, not a normal rejection");
+                        }
+                    }
+
+                    // Difficulty: same fix, canonical order instead of arrival order.
+                    let canonical_blocks = ghostdag.canonical_block_order(&canonical_tip_after);
+                    current_difficulty_target = difficulty_manager.calculate_next_target(&canonical_blocks, current_difficulty_target);
                 }
             }
 
