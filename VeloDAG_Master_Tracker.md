@@ -1,6 +1,6 @@
 # VeloDAG — Master Tracker
 
-_Last updated: 2026-09-12_
+_Last updated: 2026-09-10_
 _This is the single source of truth for project state. Update it every time something lands or gets found — not tool-dependent, works whether you're pasting code by hand or using an AI coding agent._
 
 ---
@@ -39,8 +39,9 @@ Everything below is confirmed via passing CI (`cargo test --workspace` green on 
 - [x] **Per-transaction mempool affordability filter** — `select_affordable` replaces all-or-nothing block assembly; one bad transaction no longer drops every other valid one in the same batch.
 - [x] **RPC balance/status/versioning** — `get_balance`, `transaction_status`, `version` methods; required wrapping `LedgerState` in `Arc<Mutex<...>>` so RPC actually has something to read.
 - [x] **RPC authentication** — opt-in via `VDAG_RPC_TOKEN` env var; all methods except `version` gated once set; loud startup warning if bound non-loopback with no token configured.
+- [x] **RPC rate limits + request size limits** — 64KB max request size (via `tokio-util`'s `LinesCodec`, not hand-rolled, to avoid silently dropping pipelined requests), 50 req/sec per connection, 256 max concurrent connections. Known gap flagged: no per-IP bucketing yet.
 
-**30/30 tests passing in CI as of last check.**
+**31/31 tests passing in CI as of last check.**
 
 ---
 
@@ -63,11 +64,12 @@ Explicitly documented (not hidden) limitations from work already done:
 - [x] ~~Balance queries, transaction status queries~~ — **done, see above**
 - [x] ~~RPC versioning~~ — **done, see above**
 - [x] ~~RPC authentication for remote access~~ — **done, see above**
-- [ ] RPC rate limits / request size limits
+- [x] ~~RPC rate limits / request size limits~~ — **done, see above**
 - [ ] Confirmation/finality queries (needs a tx_id→height/confirmation-depth index, not yet tracked)
 - [ ] Peer connection limits
 - [ ] Malformed-message protection
 - [ ] Peer banning + recovery
+- [ ] Per-IP RPC rate/connection bucketing (closes the gap flagged above)
 
 ### 🟡 Medium — needs a design decision or moderate new surface area
 - [x] ~~Transaction fees + fee distribution~~ — **done, see above**
