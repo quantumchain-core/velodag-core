@@ -247,6 +247,13 @@ impl LedgerState {
         self.balances.get(address).copied().unwrap_or(0)
     }
 
+    /// Whether a transaction (by id) has been confirmed in a block already
+    /// applied to this ledger. Used by RPC's `transaction_status` to
+    /// distinguish confirmed from merely-pending-in-mempool.
+    pub fn has_confirmed(&self, tx_id: &[u8; 32]) -> bool {
+        self.confirmed_transactions.contains(tx_id)
+    }
+
     /// Atomically validates and applies a block's transfers and coinbase outputs.
     pub fn apply_block(&mut self, block: &VeloBlock) -> Result<(), String> {
         let mut balances = self.balances.clone();
