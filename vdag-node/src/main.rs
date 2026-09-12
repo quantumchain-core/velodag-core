@@ -291,7 +291,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(last_block) = block_history.last() {
         current_difficulty_target = last_block.header.difficulty_target;
     }
-    let mut block_height: u64 = 0; // overwritten every tick from the selected tip's height -- see below
+    let mut block_height: u64; // set fresh every tick from the selected tip's height -- see below, no initial value needed since it's always assigned before first use
     let mut sync_pending = false;
     let mut block_timer = interval_at(
         Instant::now() + Duration::from_secs(2),
