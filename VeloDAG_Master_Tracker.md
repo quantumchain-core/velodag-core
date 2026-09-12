@@ -38,8 +38,9 @@ Everything below is confirmed via passing CI (`cargo test --workspace` green on 
 - [x] **Deterministic consensus test vectors** — 6 vectors checked against independently-computed values (Python/hashlib, not the Rust code under test): genesis hashes, block hash, tx id/merkle root, subsidy halving boundary, fee distribution, difficulty-overflow scenario. GHOSTDAG coloring itself intentionally not vectorized yet (flagged in-file as a future round, not silently skipped).
 - [x] **Per-transaction mempool affordability filter** — `select_affordable` replaces all-or-nothing block assembly; one bad transaction no longer drops every other valid one in the same batch.
 - [x] **RPC balance/status/versioning** — `get_balance`, `transaction_status`, `version` methods; required wrapping `LedgerState` in `Arc<Mutex<...>>` so RPC actually has something to read.
+- [x] **RPC authentication** — opt-in via `VDAG_RPC_TOKEN` env var; all methods except `version` gated once set; loud startup warning if bound non-loopback with no token configured.
 
-**29/29 tests passing in CI as of last check.**
+**30/30 tests passing in CI as of last check.**
 
 ---
 
@@ -61,7 +62,7 @@ Explicitly documented (not hidden) limitations from work already done:
 - [x] ~~Per-transaction mempool affordability filter~~ — **done, see above**
 - [x] ~~Balance queries, transaction status queries~~ — **done, see above**
 - [x] ~~RPC versioning~~ — **done, see above**
-- [ ] RPC authentication for remote access
+- [x] ~~RPC authentication for remote access~~ — **done, see above**
 - [ ] RPC rate limits / request size limits
 - [ ] Confirmation/finality queries (needs a tx_id→height/confirmation-depth index, not yet tracked)
 - [ ] Peer connection limits
