@@ -1,10 +1,13 @@
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore};
+use tokio_stream::StreamExt;
+use tokio_util::codec::{FramedRead, LinesCodec};
 use tracing::{info, warn};
 use vdag_consensus::{LedgerState, Mempool, Transaction, VeloBlock};
 
@@ -18,6 +21,65 @@ const RPC_API_VERSION: &str = "1.0.0";
 /// local-only usage (the default bind is 127.0.0.1), but see the startup
 /// warning below for what happens if the bind address isn't loopback.
 const RPC_TOKEN_ENV: &str = "VDAG_RPC_TOKEN";
+
+/// Hard cap on a single request's byte length. Enforced by `LinesCodec`
+/// itself (not a hand-rolled scanner) -- a naive byte-scanning
+/// implementation risks silently dropping pipelined requests that arrive
+/// in the same TCP read as an oversized one; a well-tested framing codec
+/// handles that buffering correctly instead of us re-deriving it under
+/// time pressure.
+const MAX_REQUEST_BYTES: usize = 64 * 1024;
+
+/// Per-connection request rate limit. Deliberately simple (fixed
+/// one-second sliding window, not a token bucket) -- good enough to stop
+/// a single misbehaving or malicious connection from hammering the
+/// server, which is the actual near-term threat model for a node's own
+/// control/query RPC.
+const MAX_REQUESTS_PER_SECOND_PER_CONNECTION: u32 = 50;
+
+/// Global cap on concurrent RPC connections. Protects against a
+/// connection-exhaustion DoS (opening many connections, each individually
+/// under the per-connection rate limit, to multiply total load). Enforced
+/// via a semaphore in `serve` -- connections beyond this limit are
+/// rejected immediately rather than queued.
+const MAX_CONCURRENT_RPC_CONNECTIONS: usize = 256;
+
+/// Known residual gap, flagged rather than silently left out: neither
+/// limit above is bucketed by source IP. A single actor opening
+/// `MAX_CONCURRENT_RPC_CONNECTIONS` connections from one address currently
+/// counts the same as that many different addresses each opening one.
+/// Per-IP budgeting is a real further hardening step, appropriately scoped
+/// as a follow-up rather than bundled into this round.
+
+/// Simple fixed-window rate limiter: allows up to `max_per_second`
+/// requests within each rolling one-second window, then rejects further
+/// requests until the window resets.
+struct RateLimiter {
+    window_start: Instant,
+    count: u32,
+    max_per_second: u32,
+}
+
+impl RateLimiter {
+    fn new(max_per_second: u32) -> Self {
+        Self {
+            window_start: Instant::now(),
+            count: 0,
+            max_per_second,
+        }
+    }
+
+    /// Returns true if this request is allowed under the limit.
+    fn check(&mut self) -> bool {
+        let now = Instant::now();
+        if now.duration_since(self.window_start) >= Duration::from_secs(1) {
+            self.window_start = now;
+            self.count = 0;
+        }
+        self.count += 1;
+        self.count <= self.max_per_second
+    }
+}
 
 #[derive(Debug, Deserialize)]
 struct RpcRequest {
@@ -73,13 +135,28 @@ pub async fn serve(
         (None, true) => {} // local-only, unauthenticated by design -- fine.
     }
     let auth_token = Arc::new(auth_token);
+    let connection_limiter = Arc::new(Semaphore::new(MAX_CONCURRENT_RPC_CONNECTIONS));
 
     loop {
         let (stream, peer) = listener.accept().await?;
+
+        let permit = match Arc::clone(&connection_limiter).try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                warn!(
+                    %peer,
+                    limit = MAX_CONCURRENT_RPC_CONNECTIONS,
+                    "Rejecting RPC connection: max concurrent connections reached"
+                );
+                continue;
+            }
+        };
+
         let shared_mempool = Arc::clone(&mempool);
         let shared_ledger = Arc::clone(&ledger_state);
         let shared_token = Arc::clone(&auth_token);
         tokio::spawn(async move {
+            let _permit = permit; // held for the connection's lifetime; releases on drop
             if let Err(error) =
                 handle_connection(stream, shared_mempool, shared_ledger, shared_token).await
             {
@@ -96,12 +173,33 @@ async fn handle_connection(
     auth_token: Arc<Option<String>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (reader, mut writer) = stream.into_split();
-    let mut lines = BufReader::new(reader).lines();
+    let mut lines = FramedRead::new(reader, LinesCodec::new_with_max_length(MAX_REQUEST_BYTES));
+    let mut limiter = RateLimiter::new(MAX_REQUESTS_PER_SECOND_PER_CONNECTION);
 
-    while let Some(line) = lines.next_line().await? {
-        let response = match serde_json::from_str::<RpcRequest>(&line) {
-            Ok(request) => dispatch(request, &mempool, &ledger_state, &auth_token).await,
-            Err(error) => error_response(None, format!("invalid JSON-RPC request: {error}")),
+    while let Some(line_result) = lines.next().await {
+        let response = match line_result {
+            Ok(line) => {
+                if !limiter.check() {
+                    error_response(
+                        None,
+                        format!(
+                            "rate limit exceeded: max {MAX_REQUESTS_PER_SECOND_PER_CONNECTION} requests/second per connection"
+                        ),
+                    )
+                } else {
+                    match serde_json::from_str::<RpcRequest>(&line) {
+                        Ok(request) => dispatch(request, &mempool, &ledger_state, &auth_token).await,
+                        Err(error) => {
+                            error_response(None, format!("invalid JSON-RPC request: {error}"))
+                        }
+                    }
+                }
+            }
+            // Includes MaxLineLengthExceeded -- LinesCodec discards bytes up
+            // to the next newline internally and resyncs, so it's safe to
+            // report the error for this one line and keep the connection
+            // open rather than closing it over a single oversized request.
+            Err(error) => error_response(None, format!("request framing error: {error}")),
         };
         writer.write_all(response.to_string().as_bytes()).await?;
         writer.write_all(b"\n").await?;
@@ -412,5 +510,19 @@ mod tests {
         let response = dispatch(version_request, &mempool, &ledger, &configured).await;
         assert_eq!(response["result"]["rpc_api_version"], RPC_API_VERSION);
     }
-                                                         }
-    
+
+    /// Regression test for the rate limiter's core property: requests
+    /// within the limit are allowed, the next one in the same window is
+    /// rejected. Deliberately doesn't test window-reset behavior (would
+    /// need a real sleep or an injectable clock -- reasonable to skip for
+    /// a fixed one-second window; the reset logic itself is a single
+    /// straightforward comparison, not a high-risk piece of logic).
+    #[test]
+    fn rate_limiter_allows_up_to_the_limit_then_rejects_within_the_same_window() {
+        let mut limiter = RateLimiter::new(3);
+        assert!(limiter.check());
+        assert!(limiter.check());
+        assert!(limiter.check());
+        assert!(!limiter.check());
+    }
+}
