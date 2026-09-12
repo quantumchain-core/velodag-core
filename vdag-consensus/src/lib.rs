@@ -274,60 +274,15 @@ impl LedgerState {
 
         let mut block_transactions = HashSet::new();
         for tx in &block.transactions {
-            let tx_id = VeloBlock::transaction_id(tx);
-            if !block_transactions.insert(tx_id) || !confirmed_transactions.insert(tx_id) {
-                return Err("duplicate transaction".into());
-            }
-
-            if tx.amount == 0 {
-                return Err("transaction amount must be positive".into());
-            }
-
-            let expected_nonce = next_nonces.get(&tx.sender).copied().unwrap_or(0);
-            if tx.nonce != expected_nonce {
-                return Err(format!(
-                    "invalid nonce: expected {expected_nonce}, received {}",
-                    tx.nonce
-                ));
-            }
-
-            let sender_balance = balances.get(&tx.sender).copied().unwrap_or(0);
-            let total_cost = tx
-                .amount
-                .checked_add(TRANSACTION_FEE)
-                .ok_or_else(|| "transaction cost overflow".to_string())?;
-            let remaining = sender_balance
-                .checked_sub(total_cost)
-                .ok_or_else(|| "insufficient balance for amount plus fee".to_string())?;
-            balances.insert(tx.sender, remaining);
-            let recipient_balance = balances.get(&tx.recipient).copied().unwrap_or(0);
-            balances.insert(
-                tx.recipient,
-                recipient_balance
-                    .checked_add(tx.amount)
-                    .ok_or_else(|| "recipient balance overflow".to_string())?,
-            );
-
-            // Fee distribution: half burned (credited to nobody, simply
-            // gone), the other half split via the same 95/5 ratio as the
-            // block reward. See VeloDAG_Fee_Burn_Spec.md.
-            let (fee_miner_share, fee_dev_share, _fee_burned_share) = VeloBlock::fee_distribution();
-            let miner_fee_balance = balances.get(&block.coinbase_miner_address).copied().unwrap_or(0);
-            balances.insert(
+            Self::try_apply_transaction(
+                &mut balances,
+                &mut next_nonces,
+                &mut confirmed_transactions,
+                &mut block_transactions,
+                tx,
                 block.coinbase_miner_address,
-                miner_fee_balance
-                    .checked_add(fee_miner_share)
-                    .ok_or_else(|| "miner fee balance overflow".to_string())?,
-            );
-            let dev_fee_balance = balances.get(&block.coinbase_dev_address).copied().unwrap_or(0);
-            balances.insert(
                 block.coinbase_dev_address,
-                dev_fee_balance
-                    .checked_add(fee_dev_share)
-                    .ok_or_else(|| "treasury fee balance overflow".to_string())?,
-            );
-
-            next_nonces.insert(tx.sender, expected_nonce + 1);
+            )?;
         }
 
         let miner_balance = balances
@@ -356,6 +311,131 @@ impl LedgerState {
         self.next_nonces = next_nonces;
         self.confirmed_transactions = confirmed_transactions;
         Ok(())
+    }
+
+    /// Attempts to apply a single transaction's effects (duplicate check,
+    /// nonce advance, balance debit/credit, fee charge + distribution)
+    /// onto the given scratch state, mutating it in place. Shared by
+    /// `apply_block` (whole-block, all-or-nothing) and `select_affordable`
+    /// (per-transaction, used at mempool-assembly time) so the two can
+    /// never drift apart into subtly different validation rules.
+    #[allow(clippy::too_many_arguments)]
+    fn try_apply_transaction(
+        balances: &mut HashMap<[u8; 32], u64>,
+        next_nonces: &mut HashMap<[u8; 32], u64>,
+        confirmed_transactions: &mut HashSet<[u8; 32]>,
+        block_transactions: &mut HashSet<[u8; 32]>,
+        tx: &Transaction,
+        miner_address: [u8; 32],
+        dev_address: [u8; 32],
+    ) -> Result<(), String> {
+        let tx_id = VeloBlock::transaction_id(tx);
+        if !block_transactions.insert(tx_id) || !confirmed_transactions.insert(tx_id) {
+            return Err("duplicate transaction".into());
+        }
+
+        if tx.amount == 0 {
+            return Err("transaction amount must be positive".into());
+        }
+
+        let expected_nonce = next_nonces.get(&tx.sender).copied().unwrap_or(0);
+        if tx.nonce != expected_nonce {
+            return Err(format!(
+                "invalid nonce: expected {expected_nonce}, received {}",
+                tx.nonce
+            ));
+        }
+
+        let sender_balance = balances.get(&tx.sender).copied().unwrap_or(0);
+        let total_cost = tx
+            .amount
+            .checked_add(TRANSACTION_FEE)
+            .ok_or_else(|| "transaction cost overflow".to_string())?;
+        let remaining = sender_balance
+            .checked_sub(total_cost)
+            .ok_or_else(|| "insufficient balance for amount plus fee".to_string())?;
+        balances.insert(tx.sender, remaining);
+        let recipient_balance = balances.get(&tx.recipient).copied().unwrap_or(0);
+        balances.insert(
+            tx.recipient,
+            recipient_balance
+                .checked_add(tx.amount)
+                .ok_or_else(|| "recipient balance overflow".to_string())?,
+        );
+
+        // Fee distribution: half burned (credited to nobody, simply gone),
+        // the other half split via the same 95/5 ratio as the block
+        // reward. See VeloDAG_Fee_Burn_Spec.md.
+        let (fee_miner_share, fee_dev_share, _fee_burned_share) = VeloBlock::fee_distribution();
+        let miner_fee_balance = balances.get(&miner_address).copied().unwrap_or(0);
+        balances.insert(
+            miner_address,
+            miner_fee_balance
+                .checked_add(fee_miner_share)
+                .ok_or_else(|| "miner fee balance overflow".to_string())?,
+        );
+        let dev_fee_balance = balances.get(&dev_address).copied().unwrap_or(0);
+        balances.insert(
+            dev_address,
+            dev_fee_balance
+                .checked_add(fee_dev_share)
+                .ok_or_else(|| "treasury fee balance overflow".to_string())?,
+        );
+
+        next_nonces.insert(tx.sender, expected_nonce + 1);
+        Ok(())
+    }
+
+    /// Given a batch of mempool candidates, returns (accepted, rejected)
+    /// -- the subset that can actually be applied in sequence against
+    /// current state, and the ones that can't along with why.
+    ///
+    /// This is what closes the "all-or-nothing" gap: previously, mempool
+    /// block-assembly would grab a batch and hand it straight to
+    /// `apply_block`, which rejects the *entire* block if even one
+    /// transaction in the batch is invalid -- meaning every other,
+    /// perfectly valid transaction in that batch got silently dropped
+    /// too (the mempool had already removed them via drain_to_batch, so
+    /// they were lost, not merely delayed). This evaluates each candidate
+    /// against a scratch copy of state, in order, keeping only the ones
+    /// that actually apply -- one bad transaction no longer holds every
+    /// other one hostage.
+    ///
+    /// Rejected transactions are returned (not silently discarded) so the
+    /// caller can log why, even though this round doesn't re-queue them
+    /// back into the mempool -- distinguishing "permanently invalid" from
+    /// "temporarily blocked by nonce ordering, will work once an earlier
+    /// tx confirms" is a real further improvement, intentionally left for
+    /// a future round rather than rushed here.
+    pub fn select_affordable(
+        &self,
+        candidates: Vec<Transaction>,
+        miner_address: [u8; 32],
+        dev_address: [u8; 32],
+    ) -> (Vec<Transaction>, Vec<(Transaction, String)>) {
+        let mut balances = self.balances.clone();
+        let mut next_nonces = self.next_nonces.clone();
+        let mut confirmed_transactions = self.confirmed_transactions.clone();
+        let mut block_transactions = HashSet::new();
+        let mut accepted = Vec::new();
+        let mut rejected = Vec::new();
+
+        for tx in candidates {
+            match Self::try_apply_transaction(
+                &mut balances,
+                &mut next_nonces,
+                &mut confirmed_transactions,
+                &mut block_transactions,
+                &tx,
+                miner_address,
+                dev_address,
+            ) {
+                Ok(()) => accepted.push(tx),
+                Err(reason) => rejected.push((tx, reason)),
+            }
+        }
+
+        (accepted, rejected)
     }
 }
 
@@ -637,6 +717,67 @@ mod consensus_tests {
             .apply_block(&wrong_nonce_block)
             .unwrap_err()
             .contains("invalid nonce"));
+    }
+
+    /// Regression test for the mempool all-or-nothing gap: a batch
+    /// containing one valid and one invalid transaction must not lose the
+    /// valid one. Previously, handing a mixed batch straight to
+    /// `apply_block` would reject the entire block over the one bad
+    /// transaction; `select_affordable` must instead accept the good one
+    /// and report the bad one separately, without mutating real state.
+    #[test]
+    fn select_affordable_keeps_good_transactions_and_rejects_bad_ones_independently() {
+        let sender = [41u8; 32];
+        let recipient = [42u8; 32];
+        let miner = [43u8; 32];
+
+        let mut state = LedgerState::default();
+        let (miner_reward, dev_reward) = VeloBlock::calculate_subsidy_split(1);
+        let fund_block = VeloBlock {
+            header: BlockHeader {
+                timestamp: 1,
+                parents: vec![[0u8; 32]],
+                tx_merkle_root: [0u8; 32],
+                nonce: 0,
+                height: 1,
+                difficulty_target: [0xff; 32],
+            },
+            transactions: vec![],
+            coinbase_miner_address: sender,
+            coinbase_miner_output: miner_reward,
+            coinbase_dev_address: DEV_TREASURY_ADDRESS,
+            coinbase_dev_output: dev_reward,
+        };
+        state.apply_block(&fund_block).unwrap();
+
+        let good_tx = Transaction {
+            sender,
+            recipient,
+            amount: 1000,
+            nonce: 0,
+            public_key: vec![],
+            signature: vec![],
+        };
+        // Bad: sender's next expected nonce is 0, this one claims 5.
+        let bad_tx = Transaction {
+            sender,
+            recipient,
+            amount: 1000,
+            nonce: 5,
+            public_key: vec![],
+            signature: vec![],
+        };
+
+        let (accepted, rejected) =
+            state.select_affordable(vec![good_tx.clone(), bad_tx.clone()], miner, DEV_TREASURY_ADDRESS);
+
+        assert_eq!(accepted.len(), 1);
+        assert_eq!(accepted[0].nonce, 0);
+        assert_eq!(rejected.len(), 1);
+        assert!(rejected[0].1.contains("invalid nonce"));
+
+        // select_affordable must be a dry run -- real state is untouched.
+        assert_eq!(state.balance(&recipient), 0);
     }
 
     /// Regression test dedicated to the fee/burn mechanism itself, with
