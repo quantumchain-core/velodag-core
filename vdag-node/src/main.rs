@@ -331,7 +331,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 next_block.header.timestamp = timestamp;
                 next_block.header.difficulty_target = current_difficulty_target;
-                next_block.transactions = node_mempool.lock().await.drain_to_batch(10);
+                let candidate_txs = node_mempool.lock().await.drain_to_batch(10);
+                let (affordable_txs, rejected_txs) =
+                    ledger_state.select_affordable(candidate_txs, miner_address, DEV_TREASURY_ADDRESS);
+                for (tx, reason) in &rejected_txs {
+                    warn!(
+                        sender = %encode_hex(&tx.sender[0..6]),
+                        %reason,
+                        "Dropped mempool transaction: not currently applicable"
+                    );
+                }
+                next_block.transactions = affordable_txs;
                 next_block.header.tx_merkle_root = VeloBlock::transaction_merkle_root(&next_block.transactions);
 
                 if next_block.verify_coinbase_rewards() {
