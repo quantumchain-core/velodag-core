@@ -286,8 +286,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!(address = %format!("0x{}", encode_hex(&miner_address[0..6])), "[🔒 Crypto Engine] Local Miner Live");
 
     let node_mempool = Arc::new(Mutex::new(Mempool::new()));
+    let ledger_state = Arc::new(Mutex::new(ledger_state));
     let rpc_address = env::var("VDAG_RPC_ADDR").unwrap_or_else(|_| "127.0.0.1:8545".into());
-    tokio::spawn(rpc::serve(rpc_address, Arc::clone(&node_mempool)));
+    tokio::spawn(rpc::serve(rpc_address, Arc::clone(&node_mempool), Arc::clone(&ledger_state)));
     if let Some(last_block) = block_history.last() {
         current_difficulty_target = last_block.header.difficulty_target;
     }
@@ -332,8 +333,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 next_block.header.timestamp = timestamp;
                 next_block.header.difficulty_target = current_difficulty_target;
                 let candidate_txs = node_mempool.lock().await.drain_to_batch(10);
-                let (affordable_txs, rejected_txs) =
-                    ledger_state.select_affordable(candidate_txs, miner_address, DEV_TREASURY_ADDRESS);
+                let (affordable_txs, rejected_txs) = {
+                    let guard = ledger_state.lock().await;
+                    guard.select_affordable(candidate_txs, miner_address, DEV_TREASURY_ADDRESS)
+                };
                 for (tx, reason) in &rejected_txs {
                     warn!(
                         sender = %encode_hex(&tx.sender[0..6]),
@@ -345,13 +348,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 next_block.header.tx_merkle_root = VeloBlock::transaction_merkle_root(&next_block.transactions);
 
                 if next_block.verify_coinbase_rewards() {
-                    if let Err(reason) = ledger_state.apply_block(&next_block) {
-                        warn!(height = block_height, %reason, "Local block rejected by ledger state");
-                        continue;
-                    }
-                    if let Err(reason) = storage_engine.save_ledger_state(&ledger_state) {
-                        warn!(height = block_height, %reason, "Failed to persist ledger state");
-                        continue;
+                    {
+                        let mut guard = ledger_state.lock().await;
+                        if let Err(reason) = guard.apply_block(&next_block) {
+                            warn!(height = block_height, %reason, "Local block rejected by ledger state");
+                            continue;
+                        }
+                        if let Err(reason) = storage_engine.save_ledger_state(&guard) {
+                            warn!(height = block_height, %reason, "Failed to persist ledger state");
+                            continue;
+                        }
                     }
                     // Record the target we're about to mine against *before* mining,
                     // so any peer that later needs to validate this exact block
@@ -393,8 +399,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let canonical_tip_after = ghostdag.select_canonical_tip().unwrap_or(block_hash);
                     match ghostdag.recompute_ledger(&canonical_tip_after) {
                         Ok(recomputed) => {
-                            ledger_state = recomputed;
-                            if let Err(reason) = storage_engine.save_ledger_state(&ledger_state) {
+                            let mut guard = ledger_state.lock().await;
+                            *guard = recomputed;
+                            if let Err(reason) = storage_engine.save_ledger_state(&guard) {
                                 error!(%reason, "Failed to persist recomputed ledger state");
                             }
                         }
@@ -410,6 +417,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             network_event = swarm.select_next_some() => {
+                let mut ledger_guard = ledger_state.lock().await;
                 let _ = network::handle_p2p_events(
                     network_event,
                     &mut swarm,
@@ -418,7 +426,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &mut orphans,
                     &mut block_history,
                     &mut difficulty_log,
-                    &mut ledger_state,
+                    &mut ledger_guard,
                     genesis_hash,
                     &mut sync_pending,
                     &difficulty_manager,
