@@ -13,11 +13,21 @@ use vdag_consensus::{LedgerState, Mempool, Transaction, VeloBlock};
 /// server" before relying on a method's exact response shape.
 const RPC_API_VERSION: &str = "1.0.0";
 
+/// If set, every method except `version` requires a matching `token` field
+/// in the request. If unset, the server runs unauthenticated -- fine for
+/// local-only usage (the default bind is 127.0.0.1), but see the startup
+/// warning below for what happens if the bind address isn't loopback.
+const RPC_TOKEN_ENV: &str = "VDAG_RPC_TOKEN";
+
 #[derive(Debug, Deserialize)]
 struct RpcRequest {
     id: Option<Value>,
     method: String,
     params: Option<Value>,
+    /// Present only when the server has a token configured. Not required
+    /// for `version`, which is intentionally left open as a harmless
+    /// liveness/compatibility check.
+    token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -48,12 +58,31 @@ pub async fn serve(
     let listener = TcpListener::bind(&address).await?;
     info!(%address, "RPC server listening");
 
+    let auth_token = std::env::var(RPC_TOKEN_ENV).ok();
+    let is_loopback = address.starts_with("127.0.0.1") || address.starts_with("localhost");
+    match (&auth_token, is_loopback) {
+        (None, false) => warn!(
+            %address,
+            "RPC is bound to a non-loopback address with no {} configured -- \
+             every method except 'version' is reachable by anyone who can \
+             reach this address, unauthenticated. Set {} or bind to \
+             127.0.0.1 instead.",
+            RPC_TOKEN_ENV, RPC_TOKEN_ENV
+        ),
+        (Some(_), _) => info!("RPC authentication enabled ({} is set)", RPC_TOKEN_ENV),
+        (None, true) => {} // local-only, unauthenticated by design -- fine.
+    }
+    let auth_token = Arc::new(auth_token);
+
     loop {
         let (stream, peer) = listener.accept().await?;
         let shared_mempool = Arc::clone(&mempool);
         let shared_ledger = Arc::clone(&ledger_state);
+        let shared_token = Arc::clone(&auth_token);
         tokio::spawn(async move {
-            if let Err(error) = handle_connection(stream, shared_mempool, shared_ledger).await {
+            if let Err(error) =
+                handle_connection(stream, shared_mempool, shared_ledger, shared_token).await
+            {
                 warn!(%peer, %error, "RPC connection failed");
             }
         });
@@ -64,13 +93,14 @@ async fn handle_connection(
     stream: TcpStream,
     mempool: Arc<Mutex<Mempool>>,
     ledger_state: Arc<Mutex<LedgerState>>,
+    auth_token: Arc<Option<String>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (reader, mut writer) = stream.into_split();
     let mut lines = BufReader::new(reader).lines();
 
     while let Some(line) = lines.next_line().await? {
         let response = match serde_json::from_str::<RpcRequest>(&line) {
-            Ok(request) => dispatch(request, &mempool, &ledger_state).await,
+            Ok(request) => dispatch(request, &mempool, &ledger_state, &auth_token).await,
             Err(error) => error_response(None, format!("invalid JSON-RPC request: {error}")),
         };
         writer.write_all(response.to_string().as_bytes()).await?;
@@ -84,8 +114,21 @@ async fn dispatch(
     request: RpcRequest,
     mempool: &Arc<Mutex<Mempool>>,
     ledger_state: &Arc<Mutex<LedgerState>>,
+    auth_token: &Arc<Option<String>>,
 ) -> Value {
     let id = request.id.clone().unwrap_or(Value::Null);
+
+    // "version" is intentionally exempt -- a client needs to be able to
+    // check API compatibility before it necessarily has a token, and the
+    // response leaks nothing sensitive.
+    if request.method != "version" {
+        if let Some(expected) = auth_token.as_ref() {
+            if request.token.as_deref() != Some(expected.as_str()) {
+                return error_response(Some(id), "unauthorized: missing or invalid token".into());
+            }
+        }
+    }
+
     match request.method.as_str() {
         "version" => {
             json!({ "jsonrpc": "2.0", "id": id, "result": { "rpc_api_version": RPC_API_VERSION } })
@@ -272,6 +315,7 @@ mod tests {
     async fn get_balance_reflects_ledger_state() {
         let mempool = Arc::new(Mutex::new(Mempool::new()));
         let ledger = Arc::new(Mutex::new(LedgerState::default()));
+        let no_auth: Arc<Option<String>> = Arc::new(None);
 
         let address = [7u8; 32];
         // No funding block applied -- balance must default to zero, not error.
@@ -279,8 +323,9 @@ mod tests {
             id: Some(json!(1)),
             method: "get_balance".to_string(),
             params: Some(json!({ "address": hex::encode(address) })),
+            token: None,
         };
-        let response = dispatch(request, &mempool, &ledger).await;
+        let response = dispatch(request, &mempool, &ledger, &no_auth).await;
         assert_eq!(response["result"]["balance"], 0);
     }
 
@@ -288,14 +333,16 @@ mod tests {
     async fn transaction_status_distinguishes_pending_confirmed_and_unknown() {
         let mempool = Arc::new(Mutex::new(Mempool::new()));
         let ledger = Arc::new(Mutex::new(LedgerState::default()));
+        let no_auth: Arc<Option<String>> = Arc::new(None);
 
         let unknown_id = [1u8; 32];
         let request = RpcRequest {
             id: Some(json!(1)),
             method: "transaction_status".to_string(),
             params: Some(json!({ "tx_id": hex::encode(unknown_id) })),
+            token: None,
         };
-        let response = dispatch(request, &mempool, &ledger).await;
+        let response = dispatch(request, &mempool, &ledger, &no_auth).await;
         assert_eq!(response["result"]["status"], "unknown");
     }
 
@@ -303,13 +350,67 @@ mod tests {
     async fn version_reports_the_rpc_api_version() {
         let mempool = Arc::new(Mutex::new(Mempool::new()));
         let ledger = Arc::new(Mutex::new(LedgerState::default()));
+        let no_auth: Arc<Option<String>> = Arc::new(None);
 
         let request = RpcRequest {
             id: Some(json!(1)),
             method: "version".to_string(),
             params: None,
+            token: None,
         };
-        let response = dispatch(request, &mempool, &ledger).await;
+        let response = dispatch(request, &mempool, &ledger, &no_auth).await;
         assert_eq!(response["result"]["rpc_api_version"], RPC_API_VERSION);
     }
-}
+
+    /// Regression test for the core auth behavior: once a token is
+    /// configured, every method except `version` must reject a request
+    /// with a missing or wrong token, and accept one with the correct
+    /// token. `version` remains reachable either way.
+    #[tokio::test]
+    async fn auth_token_gates_every_method_except_version() {
+        let mempool = Arc::new(Mutex::new(Mempool::new()));
+        let ledger = Arc::new(Mutex::new(LedgerState::default()));
+        let configured: Arc<Option<String>> = Arc::new(Some("s3cret".to_string()));
+
+        // No token at all -- rejected.
+        let no_token_request = RpcRequest {
+            id: Some(json!(1)),
+            method: "mempool_size".to_string(),
+            params: None,
+            token: None,
+        };
+        let response = dispatch(no_token_request, &mempool, &ledger, &configured).await;
+        assert!(response["error"]["message"].is_string());
+
+        // Wrong token -- rejected.
+        let wrong_token_request = RpcRequest {
+            id: Some(json!(2)),
+            method: "mempool_size".to_string(),
+            params: None,
+            token: Some("wrong".to_string()),
+        };
+        let response = dispatch(wrong_token_request, &mempool, &ledger, &configured).await;
+        assert!(response["error"]["message"].is_string());
+
+        // Correct token -- accepted.
+        let right_token_request = RpcRequest {
+            id: Some(json!(3)),
+            method: "mempool_size".to_string(),
+            params: None,
+            token: Some("s3cret".to_string()),
+        };
+        let response = dispatch(right_token_request, &mempool, &ledger, &configured).await;
+        assert_eq!(response["result"]["size"], 0);
+
+        // "version" remains reachable with no token even when one is configured.
+        let version_request = RpcRequest {
+            id: Some(json!(4)),
+            method: "version".to_string(),
+            params: None,
+            token: None,
+        };
+        let response = dispatch(version_request, &mempool, &ledger, &configured).await;
+        assert_eq!(response["result"]["rpc_api_version"], RPC_API_VERSION);
+    }
+                                                         }
+    
