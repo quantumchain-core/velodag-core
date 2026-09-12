@@ -1,6 +1,6 @@
 # VeloDAG — Master Tracker
 
-_Last updated: 2026-09-10_
+_Last updated: 2026-09-12_
 _This is the single source of truth for project state. Update it every time something lands or gets found — not tool-dependent, works whether you're pasting code by hand or using an AI coding agent._
 
 ---
@@ -36,8 +36,10 @@ Everything below is confirmed via passing CI (`cargo test --workspace` green on 
 - [x] **Canonical ledger/difficulty ordering** — `recompute_ledger_matches_canonical_replay` (ledger and difficulty now derived from `get_linear_sort`, not arrival order)
 - [x] **Transaction fees + burn** — `transaction_fee_is_charged_split_and_partially_burned` (flat fee, half burned, half via existing 95/5 split)
 - [x] **Deterministic consensus test vectors** — 6 vectors checked against independently-computed values (Python/hashlib, not the Rust code under test): genesis hashes, block hash, tx id/merkle root, subsidy halving boundary, fee distribution, difficulty-overflow scenario. GHOSTDAG coloring itself intentionally not vectorized yet (flagged in-file as a future round, not silently skipped).
+- [x] **Per-transaction mempool affordability filter** — `select_affordable` replaces all-or-nothing block assembly; one bad transaction no longer drops every other valid one in the same batch.
+- [x] **RPC balance/status/versioning** — `get_balance`, `transaction_status`, `version` methods; required wrapping `LedgerState` in `Arc<Mutex<...>>` so RPC actually has something to read.
 
-**25/25 tests passing in CI as of last check.**
+**29/29 tests passing in CI as of last check.**
 
 ---
 
@@ -45,7 +47,8 @@ Everything below is confirmed via passing CI (`cargo test --workspace` green on 
 
 Explicitly documented (not hidden) limitations from work already done:
 
-- [ ] **Mempool block-assembly is all-or-nothing** — if any one transaction in a batch is unaffordable, the whole block gets rejected and drained mempool transactions are lost, rather than being filtered per-transaction and retried.
+- [ ] **Mempool block-assembly is all-or-nothing** — ~~fixed via `select_affordable`, see done items above~~
+- [ ] Rejected mempool transactions aren't re-queued — logged with a reason, but not retried once the blocking condition (e.g. nonce ordering) resolves itself.
 - [ ] **`recompute_ledger`/`canonical_block_order` replay from genesis every time** — fine at testnet scale, becomes O(chain length) per new block as the chain grows. No checkpointing yet.
 - [ ] **`fixed_genesis_hash_for_network` uses placeholder timestamps for testnet/mainnet** — must be replaced with real, publicly-announced launch moments before those networks go live.
 
@@ -55,14 +58,15 @@ Explicitly documented (not hidden) limitations from work already done:
 
 ### 🟢 Fast / mechanical
 - [x] ~~Deterministic consensus test vectors~~ — **done, see above**
-- [ ] RPC versioning
+- [x] ~~Per-transaction mempool affordability filter~~ — **done, see above**
+- [x] ~~Balance queries, transaction status queries~~ — **done, see above**
+- [x] ~~RPC versioning~~ — **done, see above**
 - [ ] RPC authentication for remote access
 - [ ] RPC rate limits / request size limits
-- [ ] Balance queries, transaction status queries, confirmation/finality queries
+- [ ] Confirmation/finality queries (needs a tx_id→height/confirmation-depth index, not yet tracked)
 - [ ] Peer connection limits
 - [ ] Malformed-message protection
 - [ ] Peer banning + recovery
-- [ ] Per-transaction mempool affordability filter (closes the known gap above)
 
 ### 🟡 Medium — needs a design decision or moderate new surface area
 - [x] ~~Transaction fees + fee distribution~~ — **done, see above**
