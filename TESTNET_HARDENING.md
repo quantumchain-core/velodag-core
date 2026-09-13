@@ -1,6 +1,8 @@
 # Public Testnet Operational Hardening
 
-This repository is now code-complete for a local/devnet proof and has the final operational layer needed for a public testnet rollout.
+> **Correction note (2026-09-13):** this document originally claimed "the remaining work is not protocol correctness." That was inaccurate at the time it was written — a subsequent full code review found and fixed several genuine protocol-correctness bugs (a silent difficulty-overflow corruption, a PoW check that trusted a block's own self-declared difficulty target, and no real fork-choice mechanism, among others — see `MAINNET_TRACKER.md` for the complete list). The operational guidance below remains valid and useful; the closing "Bottom line" section has been corrected to not repeat that claim.
+
+This repository has the operational layer needed to run a local/devnet cluster and is building toward public testnet readiness — see `MAINNET_TRACKER.md` for what protocol-correctness work is still required first.
 
 ## What is already in place
 
@@ -90,4 +92,4 @@ Example usage:
 
 ## Bottom line
 
-The protocol and node logic are now in a stable state for a testnet. The remaining work is not protocol correctness; it is operational discipline: identity protection, public ingress control, durable bootstrap policy, monitoring, and process supervision.
+The operational tooling here (identity protection, bootstrap policy, ingress control, monitoring, process supervision) is in reasonable shape for a testnet rollout. **Protocol correctness is a separate, ongoing concern** — see `MAINNET_TRACKER.md` for the current, accurate status of what's implemented and verified versus what's still required before public testnet. Do not treat this document's operational readiness as implying protocol readiness; they're independent questions, and conflating them is exactly what this note is correcting.
