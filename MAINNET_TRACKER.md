@@ -149,7 +149,7 @@ All of the following must be complete before a mainnet announcement:
 - [ ] Wallet, RPC, explorer, and operator documentation are published.
 - [ ] White paper claims match implemented functionality — **corrected as of this update, see below.**
 
-## Documentation status (corrected 2026-09-10)
+## Documentation status (corrected 2026-09-13)
 
 [WHITE-PAPER.md](WHITE-PAPER.md) previously described zero-knowledge privacy, viewing keys, and a "multi-signature development treasury" as implemented. Both were inaccurate: ZK privacy is not implemented (account balances are plain and transparent, not commitment-based), and the actual treasury design is a single founder-controlled key, not a multisig (see VeloDAG_Tokenomics.md for the reasoning — a perpetual per-block fee with no pre-mine, publicly disclosed, rather than a multisig). **Both corrected as of this update.**
 
