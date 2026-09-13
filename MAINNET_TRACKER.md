@@ -1,6 +1,6 @@
 # VeloDAG Mainnet Readiness Tracker
 
-Updated: 2026-09-13
+Updated: 2026-09-14
 
 This tracker describes the current repository state. A feature is marked done only when it exists in code, is covered by a test that runs in CI, and (where the risk warrants it) has been verified at runtime, not just at compile time. Passing a build does not make the network mainnet-ready.
 
@@ -12,9 +12,9 @@ This tracker describes the current repository state. A feature is marked done on
 
 **Mainnet decision:** not ready for mainnet launch. Not ready for public testnet either — see "Required before public testnet" below, which is now short and specific rather than open-ended.
 
-**Latest verified state:** 36/36 tests passing in CI (`cargo test --workspace`), across a full review pass that found and fixed several genuine consensus-correctness bugs (see "What changed since the last update" below).
+**Latest verified state:** 41/41 tests passing in CI (`cargo test --workspace`), across a full review pass that found and fixed several genuine consensus-correctness bugs (see "What changed since the last update" below).
 
-## What changed since the last update (2026-09-08 → 2026-09-13)
+## What changed since the last update (2026-09-08 → 2026-09-14)
 
 A full manual code review found two critical, silently-corrupting bugs that had escaped local testing, plus completed most of the "in progress" items from the previous version of this tracker. In order fixed:
 
@@ -29,6 +29,7 @@ A full manual code review found two critical, silently-corrupting bugs that had 
 9. **Per-transaction mempool affordability filter** — one unaffordable transaction in a batch no longer causes every other valid transaction in that batch to be silently dropped.
 10. **RPC hardening** — `get_balance`, `transaction_status`, `version` methods added; opt-in token authentication (`VDAG_RPC_TOKEN`); 64KB request size cap, 50 req/sec per-connection rate limit, 256 max concurrent connections.
 11. **Peer-level hardening** — per-peer (2) and global (128) connection limits, malformed-gossip violation tracking, auto-ban at 5 violations.
+12. **Adversarial/property-based testing** — found and fixed a real bug: `calculate_subsidy_split` used an unguarded bit-shift that silently produces a wrong nonzero value (not a panic) once era ≥ 64, the same failure class as the earlier difficulty-overflow bug. 5 `proptest` properties added.
 
 ## Done
 
@@ -149,7 +150,7 @@ All of the following must be complete before a mainnet announcement:
 - [ ] Wallet, RPC, explorer, and operator documentation are published.
 - [ ] White paper claims match implemented functionality — **corrected as of this update, see below.**
 
-## Documentation status (corrected 2026-09-13)
+## Documentation status (corrected 2026-09-14)
 
 [WHITE-PAPER.md](WHITE-PAPER.md) previously described zero-knowledge privacy, viewing keys, and a "multi-signature development treasury" as implemented. Both were inaccurate: ZK privacy is not implemented (account balances are plain and transparent, not commitment-based), and the actual treasury design is a single founder-controlled key, not a multisig (see VeloDAG_Tokenomics.md for the reasoning — a perpetual per-block fee with no pre-mine, publicly disclosed, rather than a multisig). **Both corrected as of this update.**
 
@@ -162,5 +163,5 @@ All of the following must be complete before a mainnet announcement:
 1. Ledger checkpointing (closes the O(n)-per-block replay cost before it matters at scale).
 2. Confirmation/finality depth queries.
 3. Per-IP rate/connection bucketing and invalid-block peer attribution (closes the two remaining networking-security gaps).
-4. Adversarial/fuzz testing.
+4. ~~Adversarial/fuzz testing.~~ **Done** — property-based tests (`proptest`) added; found and fixed a real bug (subsidy-split shift-overflow at era ≥ 64, same "silently wrong in release" class as the earlier difficulty-overflow bug). Full `cargo-fuzz` harness for the gossip/RPC deserialization paths remains a good manual (non-CI) follow-up.
 5. Run a long-lived public testnet before any mainnet decision.
