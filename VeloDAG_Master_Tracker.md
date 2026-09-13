@@ -1,6 +1,6 @@
 # VeloDAG — Master Tracker
 
-_Last updated: 2026-09-13_
+_Last updated: 2026-09-10_
 _This is the single source of truth for project state. Update it every time something lands or gets found — not tool-dependent, works whether you're pasting code by hand or using an AI coding agent._
 
 ---
