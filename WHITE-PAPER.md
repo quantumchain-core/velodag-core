@@ -5,7 +5,7 @@
 **Status:** Architecture Specification / Active Implementation
 **Project Repository:** https://github.com
 
-> **Correction note (2026-09-10):** the original version of this document described zero-knowledge privacy, viewing keys, and a multi-signature treasury as implemented features. Neither was accurate. This version corrects both: ZK privacy is marked as planned future architecture, not current functionality, and the treasury description now matches the actual design (a single founder-controlled key funded by a perpetual per-block fee, not a multisig, not a pre-mine — see `VeloDAG_Tokenomics.md` for the full reasoning). See `MAINNET_TRACKER.md` for what is actually implemented and verified today.
+> **Correction note (2026-09-13):** the original version of this document described zero-knowledge privacy, viewing keys, and a multi-signature treasury as implemented features. Neither was accurate. This version corrects both: ZK privacy is marked as planned future architecture, not current functionality, and the treasury description now matches the actual design (a single founder-controlled key funded by a perpetual per-block fee, not a multisig, not a pre-mine — see `VeloDAG_Tokenomics.md` for the full reasoning). See `MAINNET_TRACKER.md` for what is actually implemented and verified today.
 
 ---
 
