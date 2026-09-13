@@ -1,6 +1,6 @@
 # VeloDAG — Master Tracker
 
-_Last updated: 2026-09-10_
+_Last updated: 2026-09-13_
 _This is the single source of truth for project state. Update it every time something lands or gets found — not tool-dependent, works whether you're pasting code by hand or using an AI coding agent._
 
 ---
@@ -40,8 +40,9 @@ Everything below is confirmed via passing CI (`cargo test --workspace` green on 
 - [x] **RPC balance/status/versioning** — `get_balance`, `transaction_status`, `version` methods; required wrapping `LedgerState` in `Arc<Mutex<...>>` so RPC actually has something to read.
 - [x] **RPC authentication** — opt-in via `VDAG_RPC_TOKEN` env var; all methods except `version` gated once set; loud startup warning if bound non-loopback with no token configured.
 - [x] **RPC rate limits + request size limits** — 64KB max request size (via `tokio-util`'s `LinesCodec`, not hand-rolled, to avoid silently dropping pipelined requests), 50 req/sec per connection, 256 max concurrent connections. Known gap flagged: no per-IP bucketing yet.
+- [x] **Peer connection limits + malformed-message protection + banning** — per-peer (2) and global (128) connection caps, malformed-gossip violation tracking attributed to `propagation_source`, auto-ban at 5 violations. Hand-rolled rather than using libp2p's own `connection-limits` crate (unverifiable feature-flag name without compile access — chose the lower-risk path). Known gap flagged: only malformed gossip *bytes* count as violations; well-formed-but-invalid blocks (bad PoW/signatures) aren't attributed to a peer yet.
 
-**31/31 tests passing in CI as of last check.**
+**36/36 tests passing in CI as of last check.**
 
 ---
 
@@ -66,10 +67,12 @@ Explicitly documented (not hidden) limitations from work already done:
 - [x] ~~RPC authentication for remote access~~ — **done, see above**
 - [x] ~~RPC rate limits / request size limits~~ — **done, see above**
 - [ ] Confirmation/finality queries (needs a tx_id→height/confirmation-depth index, not yet tracked)
-- [ ] Peer connection limits
-- [ ] Malformed-message protection
-- [ ] Peer banning + recovery
+- [x] ~~Peer connection limits~~ — **done, see above**
+- [x] ~~Malformed-message protection~~ — **done, see above**
+- [x] ~~Peer banning + recovery~~ — **done (ban only; no un-ban/recovery mechanism yet, flagged below)**
 - [ ] Per-IP RPC rate/connection bucketing (closes the gap flagged above)
+- [ ] Attribute invalid-block rejections (not just malformed bytes) to a peer for banning purposes (closes the gap flagged above)
+- [ ] Peer un-ban / recovery mechanism (currently permanent for the life of the process)
 
 ### 🟡 Medium — needs a design decision or moderate new surface area
 - [x] ~~Transaction fees + fee distribution~~ — **done, see above**
@@ -104,3 +107,4 @@ Explicitly documented (not hidden) limitations from work already done:
 - Check something off the moment CI confirms it green — not before.
 - If a fix reveals a new gap (like the mempool all-or-nothing issue did), add it to Known Gaps immediately, don't let it live only in chat history.
 - Re-tier remaining items as effort estimates change — the 🟢/🟡/🔴 split is a working guess, not gospel.
+- 
