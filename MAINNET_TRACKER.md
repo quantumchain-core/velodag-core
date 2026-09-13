@@ -1,6 +1,6 @@
 # VeloDAG Mainnet Readiness Tracker
 
-Updated: 2026-09-10
+Updated: 2026-09-13
 
 This tracker describes the current repository state. A feature is marked done only when it exists in code, is covered by a test that runs in CI, and (where the risk warrants it) has been verified at runtime, not just at compile time. Passing a build does not make the network mainnet-ready.
 
@@ -14,7 +14,7 @@ This tracker describes the current repository state. A feature is marked done on
 
 **Latest verified state:** 36/36 tests passing in CI (`cargo test --workspace`), across a full review pass that found and fixed several genuine consensus-correctness bugs (see "What changed since the last update" below).
 
-## What changed since the last update (2026-09-08 → 2026-09-10)
+## What changed since the last update (2026-09-08 → 2026-09-13)
 
 A full manual code review found two critical, silently-corrupting bugs that had escaped local testing, plus completed most of the "in progress" items from the previous version of this tracker. In order fixed:
 
