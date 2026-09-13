@@ -1,0 +1,98 @@
+name: 🛡️ VeloDAG Hardening, Audit & Bug Check
+
+on:
+  push:
+    branches: [ main, master, 'release/**' ]
+  pull_request:
+    branches: [ main, master ]
+  schedule:
+    - cron: '0 0 * * 1' # Runs every Monday at midnight to catch newly disclosed vulnerabilities
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings" # Treats all compiler warnings as hard errors
+
+jobs:
+  # 1. Code Quality, Formatting, and Linting
+  lint:
+    name: 🧵 Lint & Format
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Rust Cache
+        uses: swatinem/rust-cache@v2
+
+      - name: Check Code Formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy Security & Idiomatic Lints
+        run: cargo clippy --workspace --all-targets -- -D clippy::all -D clippy::pedantic -D clippy::security
+
+  # 2. Workspace Testing and Core Bug Hunting
+  test:
+    name: 🧪 Automated Testing
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cache
+        uses: swatinem/rust-cache@v2
+
+      - name: Build All Workspace Targets
+        run: cargo build --workspace --all-targets
+
+      - name: Run All Workspace Unit & Integration Tests
+        run: cargo test --workspace --all-targets -- --nocapture
+
+  # 3. Security Audit & Supply Chain Scanning
+  audit:
+    name: 🔎 Automated Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-audit & cargo-deny
+        run: |
+          cargo install cargo-audit --locked
+          cargo install cargo-deny --locked
+
+      - name: Audit Dependencies for Known Vulnerabilities (RUSTSEC)
+        run: cargo audit
+
+      - name: Check Licenses, Advisories, and Bans
+        run: cargo deny check
+
+  # 4. Memory Safety & Undefined Behavior Analysis
+  miri:
+    name: 🧠 Miri Memory & UB Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Nightly Rust with Miri
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+
+      - name: Run Miri on Crypto & Consensus Crates
+        # Running Miri on the network crate can be flaky due to I/O loop mocking. 
+        # Focus strictly on state transition and cryptographic operations.
+        run: |
+          cargo miri test -p vdag-crypto
+          cargo miri test -p vdag-consensus
