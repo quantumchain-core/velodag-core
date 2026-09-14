@@ -14,6 +14,7 @@
 // Rather than dropping such a block, we park it here keyed by the parent
 // hash it's waiting on, and replay it once that parent is accepted.
 
+use libp2p::PeerId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tracing::warn;
@@ -45,13 +46,20 @@ pub enum SyncResponse {
 
 /// Blocks buffered because at least one parent wasn't found locally yet.
 ///
+/// Each buffered orphan carries the `PeerId` that originally sent it (when
+/// known -- locally-mined blocks never orphan themselves, so this is only
+/// ever `None` in practice for edge cases), so that if the orphan later
+/// fails validation once its parent arrives, the rejection can still be
+/// attributed to the peer that actually sent it -- not the peer whose
+/// unrelated block happened to resolve the wait.
+///
 /// NOTE: this is a testnet-grade simplification -- a block is keyed by only
 /// the *first* missing parent encountered. A block missing multiple parents
 /// will be re-attempted when any one of them resolves (harmless: it will
 /// just fail the parent check again and get re-buffered), so correctness is
 /// preserved, but it does mean occasional redundant validation passes.
 pub struct OrphanPool {
-    waiting_on: HashMap<[u8; 32], Vec<VeloBlock>>,
+    waiting_on: HashMap<[u8; 32], Vec<(Option<PeerId>, VeloBlock)>>,
     max_size: usize,
     current_size: usize,
 }
@@ -65,8 +73,9 @@ impl OrphanPool {
         }
     }
 
-    /// Buffer `block`, which is missing `missing_parent` locally.
-    pub fn insert(&mut self, missing_parent: [u8; 32], block: VeloBlock) {
+    /// Buffer `block`, which is missing `missing_parent` locally. `source`
+    /// is the peer that sent this block, if known.
+    pub fn insert(&mut self, missing_parent: [u8; 32], source: Option<PeerId>, block: VeloBlock) {
         if self.current_size >= self.max_size {
             // Simple backpressure: refuse new orphans rather than growing
             // unbounded under a flood of blocks with bad/missing parents.
@@ -79,14 +88,14 @@ impl OrphanPool {
         self.waiting_on
             .entry(missing_parent)
             .or_default()
-            .push(block);
+            .push((source, block));
         self.current_size += 1;
     }
 
     /// Call after `resolved_hash` has been accepted into the DAG. Returns
-    /// any orphans that were specifically waiting on it, for the caller to
-    /// re-attempt validation/ingestion.
-    pub fn take_ready(&mut self, resolved_hash: &[u8; 32]) -> Vec<VeloBlock> {
+    /// any orphans that were specifically waiting on it, paired with their
+    /// original sender, for the caller to re-attempt validation/ingestion.
+    pub fn take_ready(&mut self, resolved_hash: &[u8; 32]) -> Vec<(Option<PeerId>, VeloBlock)> {
         match self.waiting_on.remove(resolved_hash) {
             Some(ready) => {
                 self.current_size = self.current_size.saturating_sub(ready.len());
@@ -95,4 +104,4 @@ impl OrphanPool {
             None => Vec::new(),
         }
     }
-}
+    }
