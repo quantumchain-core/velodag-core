@@ -1,6 +1,8 @@
 pub mod daa;
 pub mod ghostdag;
 pub mod pow;
+#[cfg(feature = "shielded")]
+pub mod shielded_state;
 
 #[cfg(test)]
 mod test_vectors;
@@ -12,6 +14,7 @@ use ghostdag::GhostdagData;
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
 use std::collections::{HashMap, HashSet};
+use vdag_crypto::verify_transaction_signature;
 
 // --- CONSTANTS FOR VELODAG EMISSION (20-Year Supply Blueprint) ---
 pub const INITIAL_BLOCK_REWARD: u64 = 83_238;
@@ -73,6 +76,8 @@ pub fn fixed_genesis_block_for_network(network_id: u64) -> VeloBlock {
             difficulty_target: [0x0f; 32],
         },
         transactions: vec![],
+        #[cfg(feature = "shielded")]
+        shielded_transactions: vec![],
         coinbase_miner_address: [0u8; 32],
         coinbase_miner_output: 0,
         coinbase_dev_address: DEV_TREASURY_ADDRESS,
@@ -120,6 +125,9 @@ pub struct Transaction {
 pub struct VeloBlock {
     pub header: BlockHeader,
     pub transactions: Vec<Transaction>,
+    #[cfg(feature = "shielded")]
+    #[serde(default)]
+    pub shielded_transactions: Vec<vdag_crypto::shielded::ShieldedTransaction>,
     pub coinbase_miner_address: [u8; 32],
     pub coinbase_miner_output: u64,
     pub coinbase_dev_address: [u8; 32],
@@ -254,6 +262,12 @@ impl VeloBlock {
         let (expected_miner, expected_dev) = Self::calculate_subsidy_split(self.header.height);
         self.coinbase_miner_output == expected_miner && self.coinbase_dev_output == expected_dev
     }
+
+    #[cfg(feature = "shielded")]
+    pub fn total_weight(&self) -> u64 {
+        self.transactions.len() as u64
+            + (self.shielded_transactions.len() as u64) * shielded_state::SHIELDED_WEIGHT
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -261,9 +275,26 @@ pub struct LedgerState {
     balances: HashMap<[u8; 32], u64>,
     next_nonces: HashMap<[u8; 32], u64>,
     confirmed_transactions: HashSet<[u8; 32]>,
+    #[cfg(feature = "shielded")]
+    #[serde(skip)]
+    pub shielded_state: Option<shielded_state::ShieldedState>,
 }
 
 impl LedgerState {
+    #[cfg(feature = "shielded")]
+    pub fn apply_shielded_transaction(
+        &mut self,
+        transaction: &vdag_crypto::shielded::ShieldedTransaction,
+    ) -> Result<(), String> {
+        let state = self
+            .shielded_state
+            .as_mut()
+            .ok_or_else(|| "shielded state is not configured".to_string())?;
+        state
+            .apply_transaction(transaction)
+            .map_err(|error| error.to_string())
+    }
+
     pub fn balance(&self, address: &[u8; 32]) -> u64 {
         self.balances.get(address).copied().unwrap_or(0)
     }
@@ -280,9 +311,21 @@ impl LedgerState {
         let mut balances = self.balances.clone();
         let mut next_nonces = self.next_nonces.clone();
         let mut confirmed_transactions = self.confirmed_transactions.clone();
+        #[cfg(feature = "shielded")]
+        let mut shielded_state = self.shielded_state.clone();
 
         if block.header.height == 0 {
             if !block.transactions.is_empty()
+                || {
+                    #[cfg(feature = "shielded")]
+                    {
+                        !block.shielded_transactions.is_empty()
+                    }
+                    #[cfg(not(feature = "shielded"))]
+                    {
+                        false
+                    }
+                }
                 || block.coinbase_miner_output != 0
                 || block.coinbase_dev_output != 0
             {
@@ -290,6 +333,10 @@ impl LedgerState {
             }
             self.balances = balances;
             self.confirmed_transactions = confirmed_transactions;
+            #[cfg(feature = "shielded")]
+            {
+                self.shielded_state = shielded_state;
+            }
             return Ok(());
         }
 
@@ -311,6 +358,50 @@ impl LedgerState {
                 block.coinbase_miner_address,
                 block.coinbase_dev_address,
             )?;
+        }
+
+        #[cfg(feature = "shielded")]
+        if !block.shielded_transactions.is_empty() {
+            let state = shielded_state
+                .as_mut()
+                .ok_or_else(|| "shielded state is not configured".to_string())?;
+            for transaction in &block.shielded_transactions {
+                if transaction.proof.len() >= 2048 {
+                    return Err("shielded proof exceeds 2047 bytes".into());
+                }
+                if transaction.fee == 0 {
+                    return Err("shielded transaction fee must be positive".into());
+                }
+                if transaction.root != state.root() {
+                    return Err("shielded transaction root does not match ledger state".into());
+                }
+                let mut public_inputs = vec![transaction.root.to_vec()];
+                public_inputs.extend(
+                    transaction
+                        .new_commitments
+                        .iter()
+                        .map(|commitment| commitment.to_vec()),
+                );
+                public_inputs.extend(
+                    transaction
+                        .nullifiers
+                        .iter()
+                        .map(|nullifier| nullifier.to_vec()),
+                );
+                let mut fee_hasher = blake3::Hasher::new();
+                fee_hasher.update(b"velodag/shielded-fee/v1");
+                fee_hasher.update(&transaction.fee.to_le_bytes());
+                public_inputs.push(fee_hasher.finalize().as_bytes().to_vec());
+                if !vdag_crypto::shielded::verify_shielded_proof(
+                    &transaction.proof,
+                    &public_inputs,
+                ) {
+                    return Err("invalid shielded proof".into());
+                }
+                state
+                    .apply_transaction(transaction)
+                    .map_err(|error| error.to_string())?;
+            }
         }
 
         let miner_balance = balances
@@ -338,6 +429,10 @@ impl LedgerState {
         self.balances = balances;
         self.next_nonces = next_nonces;
         self.confirmed_transactions = confirmed_transactions;
+        #[cfg(feature = "shielded")]
+        {
+            self.shielded_state = shielded_state;
+        }
         Ok(())
     }
 
@@ -364,6 +459,17 @@ impl LedgerState {
 
         if tx.amount == 0 {
             return Err("transaction amount must be positive".into());
+        }
+
+        if !verify_transaction_signature(
+            &tx.sender,
+            &tx.recipient,
+            tx.amount,
+            tx.nonce,
+            &tx.public_key,
+            &tx.signature,
+        ) {
+            return Err("invalid transaction signature".into());
         }
 
         let expected_nonce = next_nonces.get(&tx.sender).copied().unwrap_or(0);
@@ -628,6 +734,29 @@ impl BlockchainStorage {
 #[cfg(test)]
 mod consensus_tests {
     use super::*;
+    use vdag_crypto::{sign_message, VeloKeyPair};
+
+    fn signed_transaction(
+        keys: &VeloKeyPair,
+        recipient: [u8; 32],
+        amount: u64,
+        nonce: u64,
+    ) -> Transaction {
+        let sender = VeloKeyPair::derive_address(&keys.public_key);
+        let mut payload = Vec::with_capacity(32 + 32 + 8 + 8);
+        payload.extend_from_slice(&sender);
+        payload.extend_from_slice(&recipient);
+        payload.extend_from_slice(&amount.to_le_bytes());
+        payload.extend_from_slice(&nonce.to_le_bytes());
+        Transaction {
+            sender,
+            recipient,
+            amount,
+            nonce,
+            public_key: keys.public_key_bytes(),
+            signature: sign_message(&payload, &keys.secret_key),
+        }
+    }
 
     #[test]
     fn test_subsidy_values_and_halving() {
@@ -677,7 +806,8 @@ mod consensus_tests {
 
     #[test]
     fn ledger_state_tracks_rewards_and_rejects_invalid_spends() {
-        let miner = [1u8; 32];
+        let miner_keys = VeloKeyPair::generate();
+        let miner = VeloKeyPair::derive_address(&miner_keys.public_key);
         let recipient = [2u8; 32];
         let mut state = LedgerState::default();
         let (miner_reward, dev_reward) = VeloBlock::calculate_subsidy_split(1);
@@ -692,6 +822,8 @@ mod consensus_tests {
                 difficulty_target: [0xff; 32],
             },
             transactions: vec![],
+            #[cfg(feature = "shielded")]
+            shielded_transactions: vec![],
             coinbase_miner_address: miner,
             coinbase_miner_output: miner_reward,
             coinbase_dev_address: DEV_TREASURY_ADDRESS,
@@ -701,34 +833,33 @@ mod consensus_tests {
         assert_eq!(state.balance(&miner), miner_reward);
 
         let (fee_miner_share, fee_dev_share, fee_burned_share) = VeloBlock::fee_distribution();
-        assert_eq!(fee_miner_share + fee_dev_share + fee_burned_share, TRANSACTION_FEE);
+        assert_eq!(
+            fee_miner_share + fee_dev_share + fee_burned_share,
+            TRANSACTION_FEE
+        );
 
         // Sender must leave exactly enough room for amount + fee.
         let send_amount = miner_reward - TRANSACTION_FEE;
-        let tx = Transaction {
-            sender: miner,
-            recipient,
-            amount: send_amount,
-            nonce: 0,
-            public_key: vec![],
-            signature: vec![],
-        };
+        let tx = signed_transaction(&miner_keys, recipient, send_amount, 0);
+        let mut unsigned_tx = tx.clone();
+        unsigned_tx.signature.clear();
+        let unsigned_block = spend_block_template(
+            &reward_block,
+            miner,
+            unsigned_tx,
+            VeloBlock::calculate_subsidy_split(2),
+        );
+        assert_eq!(
+            state.apply_block(&unsigned_block).unwrap_err(),
+            "invalid transaction signature"
+        );
         let (next_miner_reward, next_dev_reward) = VeloBlock::calculate_subsidy_split(2);
-        let spend_block = VeloBlock {
-            header: BlockHeader {
-                timestamp: 2,
-                parents: vec![reward_block.calculate_hash()],
-                tx_merkle_root: VeloBlock::transaction_merkle_root(std::slice::from_ref(&tx)),
-                nonce: 0,
-                height: 2,
-                difficulty_target: [0xff; 32],
-            },
-            transactions: vec![tx.clone()],
-            coinbase_miner_address: miner,
-            coinbase_miner_output: next_miner_reward,
-            coinbase_dev_address: DEV_TREASURY_ADDRESS,
-            coinbase_dev_output: next_dev_reward,
-        };
+        let spend_block = spend_block_template(
+            &reward_block,
+            miner,
+            tx.clone(),
+            (next_miner_reward, next_dev_reward),
+        );
         state.apply_block(&spend_block).unwrap();
         // miner pays amount+fee (draining to 0 pre-coinbase), then receives
         // this block's reward PLUS their own cut of the fee they just paid
@@ -738,13 +869,39 @@ mod consensus_tests {
         assert!(state.apply_block(&spend_block).is_err());
 
         let mut wrong_nonce_block = spend_block.clone();
-        wrong_nonce_block.transactions[0].recipient = [3u8; 32];
+        wrong_nonce_block.transactions[0] =
+            signed_transaction(&miner_keys, [3u8; 32], send_amount, 2);
         wrong_nonce_block.header.tx_merkle_root =
             VeloBlock::transaction_merkle_root(&wrong_nonce_block.transactions);
         assert!(state
             .apply_block(&wrong_nonce_block)
             .unwrap_err()
             .contains("invalid nonce"));
+    }
+
+    fn spend_block_template(
+        parent: &VeloBlock,
+        miner: [u8; 32],
+        tx: Transaction,
+        (miner_output, dev_output): (u64, u64),
+    ) -> VeloBlock {
+        VeloBlock {
+            header: BlockHeader {
+                timestamp: 2,
+                parents: vec![parent.calculate_hash()],
+                tx_merkle_root: VeloBlock::transaction_merkle_root(std::slice::from_ref(&tx)),
+                nonce: 0,
+                height: 2,
+                difficulty_target: [0xff; 32],
+            },
+            transactions: vec![tx],
+            #[cfg(feature = "shielded")]
+            shielded_transactions: vec![],
+            coinbase_miner_address: miner,
+            coinbase_miner_output: miner_output,
+            coinbase_dev_address: DEV_TREASURY_ADDRESS,
+            coinbase_dev_output: dev_output,
+        }
     }
 
     /// Regression test for the mempool all-or-nothing gap: a batch
@@ -755,7 +912,8 @@ mod consensus_tests {
     /// and report the bad one separately, without mutating real state.
     #[test]
     fn select_affordable_keeps_good_transactions_and_rejects_bad_ones_independently() {
-        let sender = [41u8; 32];
+        let sender_keys = VeloKeyPair::generate();
+        let sender = VeloKeyPair::derive_address(&sender_keys.public_key);
         let recipient = [42u8; 32];
         let miner = [43u8; 32];
 
@@ -771,6 +929,8 @@ mod consensus_tests {
                 difficulty_target: [0xff; 32],
             },
             transactions: vec![],
+            #[cfg(feature = "shielded")]
+            shielded_transactions: vec![],
             coinbase_miner_address: sender,
             coinbase_miner_output: miner_reward,
             coinbase_dev_address: DEV_TREASURY_ADDRESS,
@@ -778,26 +938,15 @@ mod consensus_tests {
         };
         state.apply_block(&fund_block).unwrap();
 
-        let good_tx = Transaction {
-            sender,
-            recipient,
-            amount: 1000,
-            nonce: 0,
-            public_key: vec![],
-            signature: vec![],
-        };
+        let good_tx = signed_transaction(&sender_keys, recipient, 1000, 0);
         // Bad: sender's next expected nonce is 0, this one claims 5.
-        let bad_tx = Transaction {
-            sender,
-            recipient,
-            amount: 1000,
-            nonce: 5,
-            public_key: vec![],
-            signature: vec![],
-        };
+        let bad_tx = signed_transaction(&sender_keys, recipient, 1000, 5);
 
-        let (accepted, rejected) =
-            state.select_affordable(vec![good_tx.clone(), bad_tx.clone()], miner, DEV_TREASURY_ADDRESS);
+        let (accepted, rejected) = state.select_affordable(
+            vec![good_tx.clone(), bad_tx.clone()],
+            miner,
+            DEV_TREASURY_ADDRESS,
+        );
 
         assert_eq!(accepted.len(), 1);
         assert_eq!(accepted[0].nonce, 0);
@@ -814,7 +963,8 @@ mod consensus_tests {
     /// where the sender and miner happen to be the same address).
     #[test]
     fn transaction_fee_is_charged_split_and_partially_burned() {
-        let sender = [11u8; 32];
+        let sender_keys = VeloKeyPair::generate();
+        let sender = VeloKeyPair::derive_address(&sender_keys.public_key);
         let miner = [22u8; 32];
         let recipient = [33u8; 32];
 
@@ -830,6 +980,8 @@ mod consensus_tests {
                 difficulty_target: [0xff; 32],
             },
             transactions: vec![],
+            #[cfg(feature = "shielded")]
+            shielded_transactions: vec![],
             coinbase_miner_address: sender, // fund the sender via a block reward first
             coinbase_miner_output: miner_reward,
             coinbase_dev_address: DEV_TREASURY_ADDRESS,
@@ -839,14 +991,7 @@ mod consensus_tests {
         let starting_balance = state.balance(&sender);
 
         let send_amount = 1_000u64;
-        let tx = Transaction {
-            sender,
-            recipient,
-            amount: send_amount,
-            nonce: 0,
-            public_key: vec![],
-            signature: vec![],
-        };
+        let tx = signed_transaction(&sender_keys, recipient, send_amount, 0);
         let (next_miner_reward, next_dev_reward) = VeloBlock::calculate_subsidy_split(2);
         let spend_block = VeloBlock {
             header: BlockHeader {
@@ -858,6 +1003,8 @@ mod consensus_tests {
                 difficulty_target: [0xff; 32],
             },
             transactions: vec![tx],
+            #[cfg(feature = "shielded")]
+            shielded_transactions: vec![],
             coinbase_miner_address: miner,
             coinbase_miner_output: next_miner_reward,
             coinbase_dev_address: DEV_TREASURY_ADDRESS,
@@ -877,11 +1024,17 @@ mod consensus_tests {
         // Miner got the block reward plus their fee share -- nothing more.
         assert_eq!(state.balance(&miner), next_miner_reward + fee_miner_share);
         // Treasury got the block reward's dev share plus the fee's dev share.
-        assert_eq!(state.balance(&DEV_TREASURY_ADDRESS), dev_reward + next_dev_reward + fee_dev_share);
+        assert_eq!(
+            state.balance(&DEV_TREASURY_ADDRESS),
+            dev_reward + next_dev_reward + fee_dev_share
+        );
         // The burned share was credited to nobody: total credited across
         // sender/recipient/miner/treasury is less than what the sender
         // paid, by exactly the burned amount.
-        assert_eq!(fee_miner_share + fee_dev_share + fee_burned_share, TRANSACTION_FEE);
+        assert_eq!(
+            fee_miner_share + fee_dev_share + fee_burned_share,
+            TRANSACTION_FEE
+        );
         assert!(fee_burned_share > 0);
     }
 

@@ -5,7 +5,7 @@
 [![Crypto: Post-Quantum](https://shields.io)](WHITE-PAPER.md)
 [![CI: Built and Passing](https://github.com)](https://github.com)
 
-**VeloDAG (VDAG)** is a next-generation, high-performance Layer-1 ledger built natively in Rust. It utilizes a Directed Acyclic Graph (BlockDAG) ledger layout to achieve sub-second block finality, secured entirely by post-quantum lattice cryptography, persistent disk caching, and programmable zero-knowledge privacy.
+**VeloDAG (VDAG)** is an experimental high-performance Layer-1 ledger built natively in Rust. It uses a Directed Acyclic Graph (BlockDAG) layout, post-quantum transaction signatures, proof of work, and persistent disk storage. Account balances are currently transparent; privacy proofs are planned and are not enabled by the normal ledger.
 
 📄 **Read the Deep-Dive Architecture:** [VeloDAG Technical Whitepaper](WHITE-PAPER.md)  
 🗺️ **Track Long-Term Development:** [Protocol Roadmap](ROADMAP.md)
@@ -17,7 +17,7 @@
 *   🛡️ **Post-Quantum Security:** Natively utilizes NIST-standard **CRYSTALS-Dilithium2** signatures to safeguard transactions against future quantum decryption vectors.
 *   ⚡ **High-Throughput BlockDAG:** Replaces rigid single-threaded linear blockchains with a multi-parent graph. Blocks are mined in parallel every **1 second**.
 *   💾 **Persistent Local Ledger:** Uses the ultra-fast embedded **`sled` Key-Value engine** to serialize and commit blocks directly to non-volatile local disk storage permanently.
-*   🔒 **Zero-Knowledge Privacy:** Implements structural ZK-proofs to mask addresses and transaction values while allowing optional compliant auditor viewing keys.
+*   🔒 **Privacy roadmap:** The node now performs a local non-interactive producer proof-of-knowledge check before block production. This authorizes the configured miner but does not hide transactions; ZK transaction proofs and shielded balances remain future work.
 *   💎 **Fair-Launch & Sound Economics:** Fixed **21,000,000 supply cap** featuring a consensus-enforced **5% development tax** to fund public engineering infrastructure organically.
 
 ---

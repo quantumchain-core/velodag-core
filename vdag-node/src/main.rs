@@ -6,10 +6,14 @@ pub mod network;
 pub mod network_config;
 pub mod peer_guard;
 pub mod rpc;
+#[cfg(feature = "shielded")]
+pub mod rpc_shielded;
 pub mod sync;
 pub mod wallet;
 
 use std::env;
+#[cfg(feature = "shielded")]
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
@@ -28,7 +32,7 @@ use vdag_consensus::{
     daa::DifficultyManager, ghostdag::GhostdagManager, pow::PowManager, BlockHeader,
     BlockchainStorage, LedgerState, Mempool, VeloBlock, DEV_TREASURY_ADDRESS,
 };
-use vdag_crypto::VeloKeyPair;
+use vdag_crypto::{create_production_proof, verify_production_proof, VeloKeyPair};
 
 use behaviour::{SyncBehaviour, VeloBehaviour};
 use difficulty_log::DifficultyLog;
@@ -46,6 +50,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
 
     let args: Vec<String> = env::args().collect();
+    #[cfg(feature = "shielded")]
+    let enable_shielded_rpc = args.iter().any(|arg| arg == "--enable-shielded-rpc");
 
     if args.get(1).map(String::as_str) == Some("wallet") {
         return handle_wallet_command(&args[2..]).await;
@@ -164,11 +170,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Dial explicit --dial targets plus the resolved environment bootstrap list.
     // Config is signed and network-aware so a node can reject stale or
     // misconfigured bootstrap data before ever dialing a peer.
-    let bootstrap_config = load_bootstrap_config(&network_name)
-        .unwrap_or_else(|err| {
-            warn!(network = %network_name, error = %err, "Falling back to default bootstrap config");
-            network_config::default_bootstrap_config(&network_name)
-        });
+    let bootstrap_config = load_bootstrap_config(&network_name).unwrap_or_else(|err| {
+        warn!(network = %network_name, error = %err, "Falling back to default bootstrap config");
+        network_config::default_bootstrap_config(&network_name)
+    });
     info!(network = %network_name, network_id, seed_count = bootstrap_config.seeds.len(), "Loaded bootstrap configuration");
 
     let mut dial_targets = cli_dial_targets;
@@ -223,16 +228,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(None) => {
             info!("[🧱 Genesis Engine] Minting Fixed Genesis Block 0...");
             let genesis_block = vdag_consensus::fixed_genesis_block_for_network(network_id);
-            ledger_state.apply_block(&genesis_block).unwrap();
+            ledger_state
+                .apply_block(&genesis_block)
+                .map_err(std::io::Error::other)?;
             let genesis_dag_data = ghostdag.calculate_ghostdag_data(&genesis_block, genesis_hash);
 
-            storage_engine
-                .save_block(&genesis_hash, &genesis_block)
-                .unwrap();
-            storage_engine
-                .save_ghostdag_data(&genesis_hash, &genesis_dag_data)
-                .unwrap();
-            storage_engine.save_ledger_state(&ledger_state).unwrap();
+            storage_engine.save_block(&genesis_hash, &genesis_block)?;
+            storage_engine.save_ghostdag_data(&genesis_hash, &genesis_dag_data)?;
+            storage_engine.save_ledger_state(&ledger_state)?;
 
             ghostdag
                 .block_store
@@ -245,7 +248,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(Some(genesis_blk)) => {
             info!("[💾 Storage Engine] Resuming ledger context.");
             if persisted_ledger_state.is_none() {
-                ledger_state.apply_block(&genesis_blk).unwrap();
+                ledger_state
+                    .apply_block(&genesis_blk)
+                    .map_err(std::io::Error::other)?;
             }
             let genesis_dag_data = ghostdag.calculate_ghostdag_data(&genesis_blk, genesis_hash);
             ghostdag
@@ -263,7 +268,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             continue;
                         }
                         if persisted_ledger_state.is_none() {
-                            ledger_state.apply_block(&block).unwrap();
+                            ledger_state
+                                .apply_block(&block)
+                                .map_err(std::io::Error::other)?;
                         }
                         let block_hash = block.calculate_hash();
                         let dag_data = ghostdag.calculate_ghostdag_data(&block, block_hash);
@@ -272,16 +279,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         block_history.push(block);
                     }
                 }
-                Err(e) => error!(error = %e, "Failed to replay stored blocks"),
+                Err(e) => return Err(e),
             }
 
             if let Some(state) = persisted_ledger_state {
                 ledger_state = state;
             } else {
-                storage_engine.save_ledger_state(&ledger_state).unwrap();
+                storage_engine.save_ledger_state(&ledger_state)?;
             }
         }
         Err(e) => error!(error = %e, "[💾 Storage Engine Error] Initialization error"),
+    }
+
+    #[cfg(feature = "shielded")]
+    {
+        ledger_state.shielded_state = Some(
+            vdag_consensus::shielded_state::ShieldedState::new(
+                Path::new("velodag_ledger_data/shielded"),
+            )?,
+        );
     }
 
     let miner_keys = VeloKeyPair::generate();
@@ -291,7 +307,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let node_mempool = Arc::new(Mutex::new(Mempool::new()));
     let ledger_state = Arc::new(Mutex::new(ledger_state));
     let rpc_address = env::var("VDAG_RPC_ADDR").unwrap_or_else(|_| "127.0.0.1:8545".into());
-    tokio::spawn(rpc::serve(rpc_address, Arc::clone(&node_mempool), Arc::clone(&ledger_state)));
+    tokio::spawn(rpc::serve(
+        rpc_address,
+        Arc::clone(&node_mempool),
+        Arc::clone(&ledger_state),
+        #[cfg(feature = "shielded")]
+        enable_shielded_rpc,
+    ));
     if let Some(last_block) = block_history.last() {
         current_difficulty_target = last_block.header.difficulty_target;
     }
@@ -322,7 +344,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let current_tips = vec![selected_tip];
                 block_height = tip_height + 1;
 
-                let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+                let timestamp = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|duration| duration.as_secs())
+                    .unwrap_or(0);
                 let (miner_reward, dev_reward) = VeloBlock::calculate_subsidy_split(block_height);
 
                 let mut next_block = create_block(
@@ -350,18 +375,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 next_block.transactions = affordable_txs;
                 next_block.header.tx_merkle_root = VeloBlock::transaction_merkle_root(&next_block.transactions);
 
-                if next_block.verify_coinbase_rewards() {
-                    {
-                        let mut guard = ledger_state.lock().await;
-                        if let Err(reason) = guard.apply_block(&next_block) {
-                            warn!(height = block_height, %reason, "Local block rejected by ledger state");
-                            continue;
-                        }
-                        if let Err(reason) = storage_engine.save_ledger_state(&guard) {
-                            warn!(height = block_height, %reason, "Failed to persist ledger state");
-                            continue;
-                        }
+                let production_proof = create_production_proof(&miner_keys, &miner_address);
+                if !verify_production_proof(&production_proof, &miner_address) {
+                    error!(height = block_height, "Local producer proof verification failed");
+                    continue;
+                }
+
+                let candidate_ledger = {
+                    let guard = ledger_state.lock().await;
+                    let mut candidate = guard.clone();
+                    if let Err(reason) = candidate.apply_block(&next_block) {
+                        warn!(height = block_height, %reason, "Local block rejected by ledger state");
+                        continue;
                     }
+                    candidate
+                };
+
+                if next_block.verify_coinbase_rewards() {
                     // Record the target we're about to mine against *before* mining,
                     // so any peer that later needs to validate this exact block
                     // (orphan replay, sync catch-up) checks it against the same
@@ -378,6 +408,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     if storage_engine.save_block(&block_hash, &next_block).is_ok() {
                         let _ = storage_engine.save_ghostdag_data(&block_hash, &dag_data);
+                        {
+                            let mut guard = ledger_state.lock().await;
+                            *guard = candidate_ledger;
+                            if let Err(reason) = storage_engine.save_ledger_state(&guard) {
+                                error!(height = block_height, %reason, "Failed to persist ledger state");
+                            }
+                        }
                         info!(
                             height = block_height,
                             hash = %encode_hex(&block_hash[0..8]),
@@ -492,6 +529,8 @@ fn create_block(
             difficulty_target: [0x0f; 32],
         },
         transactions: vec![],
+        #[cfg(feature = "shielded")]
+        shielded_transactions: vec![],
         coinbase_miner_address: miner_address,
         coinbase_miner_output: miner,
         coinbase_dev_address: dev_address,

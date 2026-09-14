@@ -10,6 +10,8 @@ use tokio_stream::StreamExt;
 use tokio_util::codec::{FramedRead, LinesCodec};
 use tracing::{info, warn};
 use vdag_consensus::{LedgerState, Mempool, Transaction, VeloBlock};
+#[cfg(feature = "shielded")]
+use vdag_crypto::shielded::ShieldedTransaction;
 
 /// Bumped whenever a breaking change is made to request/response shapes or
 /// method behavior -- lets a client detect "am I talking to a compatible
@@ -112,10 +114,21 @@ struct TransactionStatusParams {
     tx_id: String,
 }
 
+#[cfg(feature = "shielded")]
+#[derive(Debug, Deserialize)]
+struct SubmitShieldedTransactionParams {
+    root: String,
+    nullifiers: Vec<String>,
+    new_commitments: Vec<String>,
+    proof: String,
+    fee: u64,
+}
+
 pub async fn serve(
     address: String,
     mempool: Arc<Mutex<Mempool>>,
     ledger_state: Arc<Mutex<LedgerState>>,
+    #[cfg(feature = "shielded")] enable_shielded_rpc: bool,
 ) -> Result<(), std::io::Error> {
     let listener = TcpListener::bind(&address).await?;
     info!(%address, "RPC server listening");
@@ -155,10 +168,20 @@ pub async fn serve(
         let shared_mempool = Arc::clone(&mempool);
         let shared_ledger = Arc::clone(&ledger_state);
         let shared_token = Arc::clone(&auth_token);
+        #[cfg(feature = "shielded")]
+        let shielded_rpc_enabled = enable_shielded_rpc;
         tokio::spawn(async move {
             let _permit = permit; // held for the connection's lifetime; releases on drop
             if let Err(error) =
-                handle_connection(stream, shared_mempool, shared_ledger, shared_token).await
+                handle_connection(
+                    stream,
+                    shared_mempool,
+                    shared_ledger,
+                    shared_token,
+                    #[cfg(feature = "shielded")]
+                    shielded_rpc_enabled,
+                )
+                .await
             {
                 warn!(%peer, %error, "RPC connection failed");
             }
@@ -171,6 +194,7 @@ async fn handle_connection(
     mempool: Arc<Mutex<Mempool>>,
     ledger_state: Arc<Mutex<LedgerState>>,
     auth_token: Arc<Option<String>>,
+    #[cfg(feature = "shielded")] enable_shielded_rpc: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (reader, mut writer) = stream.into_split();
     let mut lines = FramedRead::new(reader, LinesCodec::new_with_max_length(MAX_REQUEST_BYTES));
@@ -188,7 +212,15 @@ async fn handle_connection(
                     )
                 } else {
                     match serde_json::from_str::<RpcRequest>(&line) {
-                        Ok(request) => dispatch(request, &mempool, &ledger_state, &auth_token).await,
+                        Ok(request) => dispatch_with_options(
+                            request,
+                            &mempool,
+                            &ledger_state,
+                            &auth_token,
+                            #[cfg(feature = "shielded")]
+                            enable_shielded_rpc,
+                        )
+                        .await,
                         Err(error) => {
                             error_response(None, format!("invalid JSON-RPC request: {error}"))
                         }
@@ -208,11 +240,30 @@ async fn handle_connection(
     Ok(())
 }
 
+#[allow(dead_code)]
 async fn dispatch(
     request: RpcRequest,
     mempool: &Arc<Mutex<Mempool>>,
     ledger_state: &Arc<Mutex<LedgerState>>,
     auth_token: &Arc<Option<String>>,
+) -> Value {
+    dispatch_with_options(
+        request,
+        mempool,
+        ledger_state,
+        auth_token,
+        #[cfg(feature = "shielded")]
+        false,
+    )
+    .await
+}
+
+async fn dispatch_with_options(
+    request: RpcRequest,
+    mempool: &Arc<Mutex<Mempool>>,
+    ledger_state: &Arc<Mutex<LedgerState>>,
+    auth_token: &Arc<Option<String>>,
+    #[cfg(feature = "shielded")] enable_shielded_rpc: bool,
 ) -> Value {
     let id = request.id.clone().unwrap_or(Value::Null);
 
@@ -258,6 +309,37 @@ async fn dispatch(
                 }
                 Err(error) => error_response(Some(id), error),
             }
+        }
+        #[cfg(feature = "shielded")]
+        "submit_shielded_transaction" if enable_shielded_rpc => {
+            let params = match request.params {
+                Some(params) => match serde_json::from_value::<SubmitShieldedTransactionParams>(params) {
+                    Ok(params) => params,
+                    Err(error) => return error_response(Some(id), format!("invalid parameters: {error}")),
+                },
+                None => return error_response(Some(id), "missing parameters".into()),
+            };
+            let transaction = match parse_shielded_transaction(params) {
+                Ok(transaction) => transaction,
+                Err(error) => return error_response(Some(id), error),
+            };
+            let mut guard = ledger_state.lock().await;
+            let state = match guard.shielded_state.as_mut() {
+                Some(state) => state,
+                None => return error_response(Some(id), "shielded state is not configured".into()),
+            };
+            match crate::rpc_shielded::submit_shielded_transaction(state, transaction) {
+                Ok(hash) => json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": { "accepted": true, "tx_id": hex::encode(hash) }
+                }),
+                Err(error) => error_response(Some(id), error),
+            }
+        }
+        #[cfg(feature = "shielded")]
+        "submit_shielded_transaction" => {
+            error_response(Some(id), "shielded RPC is disabled; pass --enable-shielded-rpc".into())
         }
         "mempool_size" => {
             let size = mempool.lock().await.pending_transactions.len();
@@ -338,6 +420,31 @@ fn build_transaction(params: SubmitTransactionParams) -> Result<Transaction, Str
         nonce: params.nonce,
         public_key,
         signature,
+    })
+}
+
+#[cfg(feature = "shielded")]
+fn parse_shielded_transaction(
+    params: SubmitShieldedTransactionParams,
+) -> Result<ShieldedTransaction, String> {
+    let root = parse_fixed_bytes::<32>(&params.root, "root")?;
+    let nullifiers = params
+        .nullifiers
+        .iter()
+        .map(|value| parse_fixed_bytes::<32>(value, "nullifier"))
+        .collect::<Result<Vec<_>, _>>()?;
+    let new_commitments = params
+        .new_commitments
+        .iter()
+        .map(|value| parse_fixed_bytes::<32>(value, "commitment"))
+        .collect::<Result<Vec<_>, _>>()?;
+    let proof = hex::decode(params.proof).map_err(|_| "invalid proof hex".to_string())?;
+    Ok(ShieldedTransaction {
+        root,
+        nullifiers,
+        new_commitments,
+        proof,
+        fee: params.fee,
     })
 }
 

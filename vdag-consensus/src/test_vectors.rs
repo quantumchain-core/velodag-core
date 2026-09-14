@@ -99,6 +99,8 @@ fn vector_non_genesis_block_hash() {
             difficulty_target: SAMPLE_DIFFICULTY_TARGET,
         },
         transactions: vec![],
+        #[cfg(feature = "shielded")]
+        shielded_transactions: vec![],
         coinbase_miner_address: SAMPLE_MINER_ADDR,
         coinbase_miner_output: 0,
         coinbase_dev_address: crate::DEV_TREASURY_ADDRESS,
@@ -209,6 +211,8 @@ fn mock_block_with_time(timestamp: u64) -> VeloBlock {
             difficulty_target: [0x0f; 32],
         },
         transactions: vec![],
+        #[cfg(feature = "shielded")]
+        shielded_transactions: vec![],
         coinbase_miner_address: [0u8; 32],
         coinbase_miner_output: 0,
         coinbase_dev_address: crate::DEV_TREASURY_ADDRESS,

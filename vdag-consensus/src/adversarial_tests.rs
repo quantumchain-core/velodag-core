@@ -32,6 +32,8 @@ fn mock_block_with_timestamp(timestamp: u64) -> VeloBlock {
             difficulty_target: [0x0f; 32],
         },
         transactions: vec![],
+        #[cfg(feature = "shielded")]
+        shielded_transactions: vec![],
         coinbase_miner_address: [0u8; 32],
         coinbase_miner_output: 0,
         coinbase_dev_address: DEV_TREASURY_ADDRESS,
