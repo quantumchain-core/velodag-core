@@ -1,8 +1,9 @@
 // vdag-node/src/peer_guard.rs
 //
-// Peer-level connection limits, malformed-message violation tracking, and
-// banning. Bundled into one struct rather than three more loose parameters
-// threaded through an already-long handle_p2p_events signature.
+// Peer-level connection limits, malformed-message/invalid-block violation
+// tracking, and banning. Bundled into one struct rather than several more
+// loose parameters threaded through an already-long handle_p2p_events
+// signature.
 //
 // Deliberately hand-rolled rather than using libp2p's own
 // `libp2p-connection-limits` crate: that crate exists and would be the
@@ -10,27 +11,36 @@
 // against it, and getting a feature-flag name or API detail wrong there
 // would waste a full round discovering it via a failed build. Counting
 // connections and violations in a couple of HashMaps is simple enough to
-// be confident in without that verification step -- a case of the safer
-// bet being the boring one, not the "more correct" one, since there is
-// genuine uncertainty about the correct external API here that doesn't
-// exist for the hand-rolled version.
+// be confident in without that verification step.
 //
-// Known gap, flagged rather than hidden: only malformed *gossip* messages
-// (failed deserialization) are currently tracked as violations. A peer
-// that sends well-formed-but-invalid blocks (bad PoW, bad signatures,
-// etc.) is not yet counted toward the ban threshold -- attributing those
-// deeper rejections to a specific peer would require threading peer
-// identity through the full validate_and_ingest / orphan-replay call
-// chain, which is a larger, separate piece of work appropriately scoped
-// for its own round rather than bundled in here.
+// Bans expire after BAN_DURATION rather than lasting for the life of the
+// process. A permanent ban is too risky once real, independently-operated
+// machines are involved -- a transient bug or a brief bad connection
+// shouldn't permanently lock a legitimate peer out with no recovery path.
+// An explicit `unban` is also provided for manual recovery if needed
+// sooner than the automatic expiry.
+//
+// Known simplification, flagged rather than hidden: violation counts do
+// NOT decay over time on their own (only the resulting ban does). A peer
+// that had a couple of old, long-past violations is still just one fresh
+// violation away from a ban, rather than those old counts aging out. Given
+// the current threshold (5) and the fact that a ban itself now recovers,
+// this was judged an acceptable simplification rather than adding a second
+// time-based decay mechanism on top of ban expiry in the same round.
 
 use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 
 use libp2p::PeerId;
 
 const MAX_CONNECTIONS_PER_PEER: u32 = 2;
 const MAX_TOTAL_CONNECTIONS: u32 = 128;
 const MAX_VIOLATIONS_BEFORE_BAN: u32 = 5;
+/// How long a ban lasts before the peer is automatically allowed to
+/// reconnect. One hour is long enough to matter as a real deterrent,
+/// short enough that a mistaken or transient ban doesn't permanently
+/// strand a legitimate operator.
+const BAN_DURATION: Duration = Duration::from_secs(60 * 60);
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ConnectionDecision {
@@ -45,7 +55,7 @@ pub struct PeerGuard {
     connections_per_peer: HashMap<PeerId, u32>,
     total_connections: u32,
     violations: HashMap<PeerId, u32>,
-    banned: HashSet<PeerId>,
+    banned_until: HashMap<PeerId, Instant>,
 }
 
 impl PeerGuard {
@@ -53,8 +63,29 @@ impl PeerGuard {
         Self::default()
     }
 
-    pub fn is_banned(&self, peer: &PeerId) -> bool {
-        self.banned.contains(peer)
+    /// Whether `peer` is currently banned. Expired bans are treated as not
+    /// banned (and lazily cleaned up here) rather than requiring a
+    /// separate sweep pass.
+    pub fn is_banned(&mut self, peer: &PeerId) -> bool {
+        match self.banned_until.get(peer) {
+            Some(&expiry) if Instant::now() < expiry => true,
+            Some(_) => {
+                // Ban has expired -- clean it up and give the peer a clean
+                // slate, including their violation count, so an old,
+                // already-served ban doesn't leave them one violation from
+                // an instant re-ban.
+                self.banned_until.remove(peer);
+                self.violations.remove(peer);
+                false
+            }
+            None => false,
+        }
+    }
+
+    /// Manually clears a ban immediately, without waiting for expiry.
+    pub fn unban(&mut self, peer: &PeerId) {
+        self.banned_until.remove(peer);
+        self.violations.remove(peer);
     }
 
     /// Call on `SwarmEvent::ConnectionEstablished`, before doing anything
@@ -62,7 +93,7 @@ impl PeerGuard {
     /// the caller must immediately disconnect the peer and skip any
     /// further per-connection setup (e.g. sending a sync request).
     pub fn on_connection_established(&mut self, peer: PeerId) -> ConnectionDecision {
-        if self.banned.contains(&peer) {
+        if self.is_banned(&peer) {
             return ConnectionDecision::RejectAlreadyBanned;
         }
 
@@ -93,20 +124,31 @@ impl PeerGuard {
         self.total_connections = self.total_connections.saturating_sub(1);
     }
 
-    /// Records a malformed/invalid message attributed to `peer`. Returns
-    /// `true` if this violation just pushed the peer over the ban
+    /// Records a malformed message or invalid block attributed to `peer`.
+    /// Returns `true` if this violation just pushed the peer over the ban
     /// threshold -- the caller should disconnect them immediately when
     /// this returns true; `is_banned` will report `true` for this peer
-    /// from this point on regardless.
+    /// until the ban expires or is manually cleared.
     pub fn record_violation(&mut self, peer: PeerId) -> bool {
         let count = self.violations.entry(peer).or_insert(0);
         *count += 1;
         if *count >= MAX_VIOLATIONS_BEFORE_BAN {
-            self.banned.insert(peer);
+            self.banned_until.insert(peer, Instant::now() + BAN_DURATION);
             true
         } else {
             false
         }
+    }
+
+    /// Peers currently under a ban, for diagnostics/operator visibility.
+    /// Does not trigger expiry cleanup (use `is_banned` per-peer for that).
+    pub fn currently_banned(&self) -> HashSet<PeerId> {
+        let now = Instant::now();
+        self.banned_until
+            .iter()
+            .filter(|(_, &expiry)| now < expiry)
+            .map(|(&peer, _)| peer)
+            .collect()
     }
 }
 
@@ -179,4 +221,39 @@ mod tests {
         }
         assert!(guard.record_violation(peer));
     }
-}
+
+    /// Regression test for the recovery mechanism itself: manually
+    /// unbanning a peer clears both the ban and their violation count,
+    /// giving them a genuine clean slate rather than leaving them one
+    /// violation away from an instant re-ban.
+    #[test]
+    fn unban_clears_both_the_ban_and_the_violation_count() {
+        let mut guard = PeerGuard::new();
+        let peer = PeerId::random();
+
+        for _ in 0..MAX_VIOLATIONS_BEFORE_BAN {
+            guard.record_violation(peer);
+        }
+        assert!(guard.is_banned(&peer));
+
+        guard.unban(&peer);
+        assert!(!guard.is_banned(&peer));
+
+        // A single fresh violation must not immediately re-ban -- proves
+        // the old count was actually cleared, not just the ban flag.
+        assert!(!guard.record_violation(peer));
+    }
+
+    #[test]
+    fn currently_banned_reports_active_bans() {
+        let mut guard = PeerGuard::new();
+        let peer = PeerId::random();
+
+        assert!(guard.currently_banned().is_empty());
+        for _ in 0..MAX_VIOLATIONS_BEFORE_BAN {
+            guard.record_violation(peer);
+        }
+        assert!(guard.currently_banned().contains(&peer));
+    }
+    }
+    
