@@ -12,9 +12,9 @@ This tracker describes the current repository state. A feature is marked done on
 
 **Mainnet decision:** not ready for mainnet launch. Not ready for public testnet either — see "Required before public testnet" below, which is now short and specific rather than open-ended.
 
-**Latest verified state:** 41/41 tests passing in CI (`cargo test --workspace`), across a full review pass that found and fixed several genuine consensus-correctness bugs (see "What changed since the last update" below).
+**Latest verified state:** 43/43 tests passing in CI (`cargo test --workspace`), across a full review pass that found and fixed several genuine consensus-correctness bugs (see "What changed since the last update" below).
 
-## What changed since the last update (2026-09-08 → 2026-09-14)
+## What changed since the last update (2026-09-08 → 2026-09-10)
 
 A full manual code review found two critical, silently-corrupting bugs that had escaped local testing, plus completed most of the "in progress" items from the previous version of this tracker. In order fixed:
 
@@ -30,6 +30,7 @@ A full manual code review found two critical, silently-corrupting bugs that had 
 10. **RPC hardening** — `get_balance`, `transaction_status`, `version` methods added; opt-in token authentication (`VDAG_RPC_TOKEN`); 64KB request size cap, 50 req/sec per-connection rate limit, 256 max concurrent connections.
 11. **Peer-level hardening** — per-peer (2) and global (128) connection limits, malformed-gossip violation tracking, auto-ban at 5 violations.
 12. **Adversarial/property-based testing** — found and fixed a real bug: `calculate_subsidy_split` used an unguarded bit-shift that silently produces a wrong nonzero value (not a panic) once era ≥ 64, the same failure class as the earlier difficulty-overflow bug. 5 `proptest` properties added.
+13. **Invalid-block peer attribution + ban recovery** — every genuine block-validation rejection now counts toward banning, not just malformed bytes; orphaning/duplicates explicitly excluded (normal network behavior, not misbehavior); bans expire after 1 hour instead of lasting the process lifetime.
 
 ## Done
 
@@ -121,8 +122,8 @@ This list is now short and specific — most of what used to be here is done (se
 ### Networking security
 
 - [ ] Per-IP bucketing for RPC rate limits and connection counts (currently limits are global/per-connection, not per-source-address).
-- [ ] Attribute invalid-block rejections (bad PoW, bad signatures — not just malformed bytes) to a specific peer for ban purposes; currently only malformed gossip payloads count toward the ban threshold.
-- [ ] Peer un-ban / recovery mechanism (bans are currently permanent for the life of the process).
+- [x] ~~Attribute invalid-block rejections (bad PoW, bad signatures — not just malformed bytes) to a specific peer for ban purposes~~ — **done**, see "What changed" log.
+- [x] ~~Peer un-ban / recovery mechanism~~ — **done**, bans now expire after 1 hour plus manual `unban()`, see "What changed" log.
 - [ ] Add stable public seed nodes and operator-run bootstrap policy.
 - [ ] Add NAT traversal or relay support for nodes behind private networks.
 - [ ] Test partitions, delayed peers, duplicate messages, and long sync gaps under real (not loopback) network conditions.
@@ -150,7 +151,7 @@ All of the following must be complete before a mainnet announcement:
 - [ ] Wallet, RPC, explorer, and operator documentation are published.
 - [ ] White paper claims match implemented functionality — **corrected as of this update, see below.**
 
-## Documentation status (corrected 2026-09-14)
+## Documentation status (corrected 2026-09-10)
 
 [WHITE-PAPER.md](WHITE-PAPER.md) previously described zero-knowledge privacy, viewing keys, and a "multi-signature development treasury" as implemented. Both were inaccurate: ZK privacy is not implemented (account balances are plain and transparent, not commitment-based), and the actual treasury design is a single founder-controlled key, not a multisig (see VeloDAG_Tokenomics.md for the reasoning — a perpetual per-block fee with no pre-mine, publicly disclosed, rather than a multisig). **Both corrected as of this update.**
 
