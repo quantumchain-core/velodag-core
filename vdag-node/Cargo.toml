@@ -7,7 +7,6 @@ edition = "2021"
 # Workspace Crate Links
 vdag-consensus = { path = "../vdag-consensus" }
 vdag-crypto = { path = "../vdag-crypto" }
-vdag-network = { path = "../vdag-network" }
 
 # External System Async & Serde Toolchains
 tokio = { version = "1.38", features = ["full"] }
