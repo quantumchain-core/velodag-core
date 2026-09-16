@@ -1,6 +1,6 @@
 # VeloDAG Mainnet Readiness Tracker
 
-Updated: 2026-09-14
+Updated: 2026-09-16
 
 This tracker describes the current repository state. A feature is marked done only when it exists in code, is covered by a test that runs in CI, and (where the risk warrants it) has been verified at runtime, not just at compile time. Passing a build does not make the network mainnet-ready.
 
@@ -31,6 +31,17 @@ A full manual code review found two critical, silently-corrupting bugs that had 
 11. **Peer-level hardening** — per-peer (2) and global (128) connection limits, malformed-gossip violation tracking, auto-ban at 5 violations.
 12. **Adversarial/property-based testing** — found and fixed a real bug: `calculate_subsidy_split` used an unguarded bit-shift that silently produces a wrong nonzero value (not a panic) once era ≥ 64, the same failure class as the earlier difficulty-overflow bug. 5 `proptest` properties added.
 13. **Invalid-block peer attribution + ban recovery** — every genuine block-validation rejection now counts toward banning, not just malformed bytes; orphaning/duplicates explicitly excluded (normal network behavior, not misbehavior); bans expire after 1 hour instead of lasting the process lifetime.
+14. **Removed dead `vdag-network` dependency** — an early-prototype P2P implementation (own random identity, hardcoded port, zero validation/limits/banning) was still listed as a `vdag-node` dependency despite being called from nowhere in the active codebase. Real P2P lives entirely in `vdag-node/src/network.rs`. Left as a dependency, this was a real liability: anything accidentally wiring it in would have spun up a second, completely unhardened swarm alongside the real one. Removed from `vdag-node/Cargo.toml`; the crate's source can be deleted from the workspace entirely in a future cleanup pass.
+
+## Open strategic risk: ZKP merge timing (flagged 2026-09-10, not yet resolved)
+
+A separate branch is in development adding zero-knowledge privacy features. The proposed plan was "launch mainnet without ZKP, merge it in a few days." **This tracker recommends against a fixed short timeline for merging ZKP into a live mainnet.** Reasoning:
+
+- Adding ZK transaction types to an already-live chain is very likely a hard fork, requiring coordinated node upgrades, not a routine merge.
+- It would bypass every gate in the "Mainnet launch gates" section below (frozen spec, independent audit, reproducible builds) for a major new cryptographic subsystem specifically.
+- A public "few days" promise creates pressure to rush review on exactly the code where rushing is most dangerous.
+
+**Recommended alternative:** launch mainnet explicitly labeled v1 (transparent balances, no privacy layer), with ZKP developed and tested on its own branch through its own testnet cycle before it ever touches mainnet consensus rules — no fixed merge-date commitment made publicly until that review is actually done. This is a decision for the project owner, not something this tracker can resolve unilaterally — recorded here so it isn't only a chat conversation that gets lost.
 
 ## Done
 
