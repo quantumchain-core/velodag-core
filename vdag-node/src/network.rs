@@ -16,9 +16,13 @@
 // against its own say-so.
 
 use std::error::Error;
+use std::net::IpAddr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use libp2p::{gossipsub, gossipsub::IdentTopic, mdns, request_response, swarm::SwarmEvent, Swarm};
+use libp2p::{
+    gossipsub, gossipsub::IdentTopic, mdns, multiaddr::Protocol, request_response,
+    swarm::SwarmEvent, Multiaddr, Swarm,
+};
 use tracing::{info, warn};
 
 use vdag_consensus::{
@@ -44,6 +48,29 @@ pub const GOSSIP_TOPIC: &str = "vdag-blocks";
 const MAX_GOSSIP_MESSAGE_BYTES: usize = 2 * 1024 * 1024; // 2 MB
 const MAX_TRANSACTIONS_PER_BLOCK: usize = 5_000;
 const MAX_FUTURE_DRIFT_SECS: u64 = 30;
+
+/// Extracts the IP component (v4 or v6) from a connection's multiaddr, for
+/// per-source-IP connection bucketing in `PeerGuard`. Returns `None` for
+/// any transport that doesn't carry an IP in its address (rare for this
+/// project's TCP-only transport, but handled rather than assumed away) --
+/// a missing IP is treated as "skip the per-IP check" by `PeerGuard`, not
+/// as grounds for rejection on its own.
+///
+/// NOTE on confidence: this is the one piece of tonight's per-IP bucketing
+/// work I could not verify against a real compiler. `endpoint.get_remote_address()`
+/// and the `Protocol::Ip4`/`Protocol::Ip6` match arms are the standard,
+/// long-stable libp2p pattern for this and I'm confident in the shape of
+/// it, but if `cargo build` reports an error specifically on this function
+/// or its call sites in the `ConnectionEstablished`/`ConnectionClosed`
+/// handlers, paste the exact error back -- it's the one spot tonight where
+/// "trust the review, it's proven" doesn't fully apply.
+fn extract_ip(addr: &Multiaddr) -> Option<IpAddr> {
+    addr.iter().find_map(|proto| match proto {
+        Protocol::Ip4(ip) => Some(IpAddr::V4(ip)),
+        Protocol::Ip6(ip) => Some(IpAddr::V6(ip)),
+        _ => None,
+    })
+}
 
 /// Top-level dispatcher for every swarm event. Called once per event from
 /// the main select! loop.
@@ -148,17 +175,18 @@ pub fn handle_p2p_events(
         // On connect, check peer-level limits/ban status before doing
         // anything else -- a rejected connection gets disconnected
         // immediately and skips the sync-request setup below entirely.
-        SwarmEvent::ConnectionEstablished { peer_id, .. } => {
-            match peer_guard.on_connection_established(peer_id) {
+        SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
+            let peer_ip = extract_ip(endpoint.get_remote_address());
+            match peer_guard.on_connection_established(peer_id, peer_ip) {
                 ConnectionDecision::Allow => {}
                 decision => {
-                    warn!(%peer_id, ?decision, "Rejecting connection: peer limit or ban");
+                    warn!(%peer_id, ?decision, ?peer_ip, "Rejecting connection: peer/IP limit or ban");
                     let _ = swarm.disconnect_peer_id(peer_id);
                     return Ok(());
                 }
             }
 
-            info!(%peer_id, "Connection established");
+            info!(%peer_id, ?peer_ip, "Connection established");
             *sync_pending = true;
             let since_height = block_history
                 .iter()
@@ -175,8 +203,9 @@ pub fn handle_p2p_events(
             );
         }
 
-        SwarmEvent::ConnectionClosed { peer_id, .. } => {
-            peer_guard.on_connection_closed(&peer_id);
+        SwarmEvent::ConnectionClosed { peer_id, endpoint, .. } => {
+            let peer_ip = extract_ip(endpoint.get_remote_address());
+            peer_guard.on_connection_closed(&peer_id, peer_ip);
         }
 
         _ => {}

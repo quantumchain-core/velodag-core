@@ -29,6 +29,7 @@
 // time-based decay mechanism on top of ban expiry in the same round.
 
 use std::collections::{HashMap, HashSet};
+use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
 use libp2p::PeerId;
@@ -36,6 +37,13 @@ use libp2p::PeerId;
 const MAX_CONNECTIONS_PER_PEER: u32 = 2;
 const MAX_TOTAL_CONNECTIONS: u32 = 128;
 const MAX_VIOLATIONS_BEFORE_BAN: u32 = 5;
+/// Per-source-IP cap on concurrent P2P connections. A single PeerId is
+/// cheap to generate (just a keypair), so the per-peer limit above is
+/// trivially bypassable by an actor rotating identities from one address --
+/// this closes that gap. Lower than the RPC per-IP limit (16) since
+/// legitimate P2P nodes rarely run many instances from one address, unlike
+/// RPC clients (wallet + monitoring + explorer from the same operator).
+const MAX_CONNECTIONS_PER_IP: u32 = 4;
 /// How long a ban lasts before the peer is automatically allowed to
 /// reconnect. One hour is long enough to matter as a real deterrent,
 /// short enough that a mistaken or transient ban doesn't permanently
@@ -47,12 +55,14 @@ pub enum ConnectionDecision {
     Allow,
     RejectAlreadyBanned,
     RejectOverPeerLimit,
+    RejectOverIpLimit,
     RejectOverTotalLimit,
 }
 
 #[derive(Default)]
 pub struct PeerGuard {
     connections_per_peer: HashMap<PeerId, u32>,
+    connections_per_ip: HashMap<IpAddr, u32>,
     total_connections: u32,
     violations: HashMap<PeerId, u32>,
     banned_until: HashMap<PeerId, Instant>,
@@ -89,10 +99,14 @@ impl PeerGuard {
     }
 
     /// Call on `SwarmEvent::ConnectionEstablished`, before doing anything
-    /// else with this peer. If this returns anything other than `Allow`,
+    /// else with this peer. `ip` is the peer's source address, when it can
+    /// be extracted from the connection's multiaddr (see network.rs) --
+    /// `None` is treated as "skip the per-IP check" rather than a reject,
+    /// since a missing IP (e.g. an unusual transport) shouldn't itself be
+    /// grounds for rejection. If this returns anything other than `Allow`,
     /// the caller must immediately disconnect the peer and skip any
     /// further per-connection setup (e.g. sending a sync request).
-    pub fn on_connection_established(&mut self, peer: PeerId) -> ConnectionDecision {
+    pub fn on_connection_established(&mut self, peer: PeerId, ip: Option<IpAddr>) -> ConnectionDecision {
         if self.is_banned(&peer) {
             return ConnectionDecision::RejectAlreadyBanned;
         }
@@ -101,11 +115,22 @@ impl PeerGuard {
         if per_peer_count >= MAX_CONNECTIONS_PER_PEER {
             return ConnectionDecision::RejectOverPeerLimit;
         }
+
+        if let Some(ip) = ip {
+            let per_ip_count = self.connections_per_ip.get(&ip).copied().unwrap_or(0);
+            if per_ip_count >= MAX_CONNECTIONS_PER_IP {
+                return ConnectionDecision::RejectOverIpLimit;
+            }
+        }
+
         if self.total_connections >= MAX_TOTAL_CONNECTIONS {
             return ConnectionDecision::RejectOverTotalLimit;
         }
 
         self.connections_per_peer.insert(peer, per_peer_count + 1);
+        if let Some(ip) = ip {
+            *self.connections_per_ip.entry(ip).or_insert(0) += 1;
+        }
         self.total_connections += 1;
         ConnectionDecision::Allow
     }
@@ -113,12 +138,22 @@ impl PeerGuard {
     /// Call on `SwarmEvent::ConnectionClosed` for every peer, unconditionally
     /// -- safe to call even for a connection that was never counted (e.g.
     /// one rejected by `on_connection_established`), since the counters
-    /// simply saturate at zero rather than underflowing.
-    pub fn on_connection_closed(&mut self, peer: &PeerId) {
+    /// simply saturate at zero rather than underflowing. Pass the same
+    /// `ip` that was passed to the matching `on_connection_established`
+    /// call, when available.
+    pub fn on_connection_closed(&mut self, peer: &PeerId, ip: Option<IpAddr>) {
         if let Some(count) = self.connections_per_peer.get_mut(peer) {
             *count = count.saturating_sub(1);
             if *count == 0 {
                 self.connections_per_peer.remove(peer);
+            }
+        }
+        if let Some(ip) = ip {
+            if let Some(count) = self.connections_per_ip.get_mut(&ip) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    self.connections_per_ip.remove(&ip);
+                }
             }
         }
         self.total_connections = self.total_connections.saturating_sub(1);
@@ -161,10 +196,10 @@ mod tests {
         let mut guard = PeerGuard::new();
         let peer = PeerId::random();
 
-        assert_eq!(guard.on_connection_established(peer), ConnectionDecision::Allow);
-        assert_eq!(guard.on_connection_established(peer), ConnectionDecision::Allow);
+        assert_eq!(guard.on_connection_established(peer, None), ConnectionDecision::Allow);
+        assert_eq!(guard.on_connection_established(peer, None), ConnectionDecision::Allow);
         assert_eq!(
-            guard.on_connection_established(peer),
+            guard.on_connection_established(peer, None),
             ConnectionDecision::RejectOverPeerLimit
         );
     }
@@ -174,15 +209,15 @@ mod tests {
         let mut guard = PeerGuard::new();
         let peer = PeerId::random();
 
-        guard.on_connection_established(peer);
-        guard.on_connection_established(peer);
+        guard.on_connection_established(peer, None);
+        guard.on_connection_established(peer, None);
         assert_eq!(
-            guard.on_connection_established(peer),
+            guard.on_connection_established(peer, None),
             ConnectionDecision::RejectOverPeerLimit
         );
 
-        guard.on_connection_closed(&peer);
-        assert_eq!(guard.on_connection_established(peer), ConnectionDecision::Allow);
+        guard.on_connection_closed(&peer, None);
+        assert_eq!(guard.on_connection_established(peer, None), ConnectionDecision::Allow);
     }
 
     #[test]
@@ -195,7 +230,7 @@ mod tests {
         }
         assert!(guard.is_banned(&peer));
         assert_eq!(
-            guard.on_connection_established(peer),
+            guard.on_connection_established(peer, None),
             ConnectionDecision::RejectAlreadyBanned
         );
     }
@@ -255,5 +290,4 @@ mod tests {
         }
         assert!(guard.currently_banned().contains(&peer));
     }
-    }
-    
+}

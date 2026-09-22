@@ -39,6 +39,7 @@ use sync::OrphanPool;
 
 const IDENTITY_KEY_PATH: &str = "node_identity.key";
 const BOOTSTRAP_FILE_PATH: &str = "bootstrap_peers.txt";
+const MINER_WALLET_PATH: &str = "miner_wallet.json";
 const ORPHAN_POOL_MAX: usize = 1024;
 
 #[tokio::main]
@@ -254,9 +255,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Ok(Some(genesis_blk)) => {
             info!("[💾 Storage Engine] Resuming ledger context.");
-            if persisted_ledger_state.is_none() {
-                ledger_state.apply_block(&genesis_blk).unwrap();
-            }
             let genesis_dag_data = ghostdag.calculate_ghostdag_data(&genesis_blk, genesis_hash);
             ghostdag
                 .block_store
@@ -272,9 +270,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if block.header.height == 0 {
                             continue;
                         }
-                        if persisted_ledger_state.is_none() {
-                            ledger_state.apply_block(&block).unwrap();
-                        }
                         let block_hash = block.calculate_hash();
                         let dag_data = ghostdag.calculate_ghostdag_data(&block, block_hash);
                         ghostdag.block_store.insert(block_hash, block.clone());
@@ -285,18 +280,53 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Err(e) => error!(error = %e, "Failed to replay stored blocks"),
             }
 
-            if let Some(state) = persisted_ledger_state {
-                ledger_state = state;
-            } else {
-                storage_engine.save_ledger_state(&ledger_state).unwrap();
+            // Ledger authority on restart: always recompute fresh from the
+            // replayed blocks (the atomic source of truth) rather than
+            // trusting a persisted ledger snapshot as-is. Block storage
+            // and the ledger snapshot are two separate disk writes with no
+            // cross-tree atomicity between them -- if the process crashed
+            // between them (block saved, ledger snapshot not yet updated
+            // to match), blindly trusting a stale snapshot would silently
+            // under-report balances relative to what the persisted blocks
+            // actually say happened. This is the same proven pattern
+            // already used after every new block (see network.rs/main.rs's
+            // post-ingest ledger recompute), just applied once more here.
+            match ghostdag.select_canonical_tip() {
+                Some(canonical_tip) => match ghostdag.recompute_ledger(&canonical_tip) {
+                    Ok(recomputed) => {
+                        ledger_state = recomputed;
+                        if let Err(e) = storage_engine.save_ledger_state(&ledger_state) {
+                            error!(error = %e, "Failed to persist recomputed startup ledger state");
+                        }
+                    }
+                    Err(e) => {
+                        error!(
+                            error = %e,
+                            "Startup ledger recompute failed -- falling back to persisted snapshot if any"
+                        );
+                        if let Some(state) = persisted_ledger_state {
+                            ledger_state = state;
+                        }
+                    }
+                },
+                None => {
+                    if let Some(state) = persisted_ledger_state {
+                        ledger_state = state;
+                    }
+                }
             }
         }
         Err(e) => error!(error = %e, "[💾 Storage Engine Error] Initialization error"),
     }
 
-    let miner_keys = VeloKeyPair::generate();
+    let miner_keys = wallet::load_or_create(MINER_WALLET_PATH)?;
     let miner_address = VeloKeyPair::derive_address(&miner_keys.public_key);
-    info!(address = %format!("0x{}", encode_hex(&miner_address[0..6])), "[🔒 Crypto Engine] Local Miner Live");
+    let miner_address_hex = encode_hex(&miner_address);
+    info!(
+        address = %format!("0x{miner_address_hex}"),
+        wallet = MINER_WALLET_PATH,
+        "[🔒 Crypto Engine] Local Miner Live -- this is your reward address, persistent across restarts. Check it any time via the get_balance RPC method."
+    );
 
     let node_mempool = Arc::new(Mutex::new(Mempool::new()));
     let ledger_state = Arc::new(Mutex::new(ledger_state));
