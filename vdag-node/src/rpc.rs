@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -44,12 +46,14 @@ const MAX_REQUESTS_PER_SECOND_PER_CONNECTION: u32 = 50;
 /// rejected immediately rather than queued.
 const MAX_CONCURRENT_RPC_CONNECTIONS: usize = 256;
 
-/// Known residual gap, flagged rather than silently left out: neither
-/// limit above is bucketed by source IP. A single actor opening
-/// `MAX_CONCURRENT_RPC_CONNECTIONS` connections from one address currently
-/// counts the same as that many different addresses each opening one.
-/// Per-IP budgeting is a real further hardening step, appropriately scoped
-/// as a follow-up rather than bundled into this round.
+/// Per-source-IP cap on concurrent RPC connections. Closes the gap noted
+/// below this constant used to describe: without this, one actor opening
+/// many connections from a single address counted the same as that many
+/// different addresses each opening one. 16 is generous enough for a
+/// legitimate operator running several tools (wallet, monitoring, explorer)
+/// against their own node from one address, while still bounding a single
+/// source's ability to consume the global connection budget alone.
+const MAX_CONNECTIONS_PER_IP: usize = 16;
 
 /// Simple fixed-window rate limiter: allows up to `max_per_second`
 /// requests within each rolling one-second window, then rejects further
@@ -136,6 +140,7 @@ pub async fn serve(
     }
     let auth_token = Arc::new(auth_token);
     let connection_limiter = Arc::new(Semaphore::new(MAX_CONCURRENT_RPC_CONNECTIONS));
+    let per_ip_connections: Arc<Mutex<HashMap<IpAddr, usize>>> = Arc::new(Mutex::new(HashMap::new()));
 
     loop {
         let (stream, peer) = listener.accept().await?;
@@ -152,15 +157,38 @@ pub async fn serve(
             }
         };
 
+        let peer_ip = peer.ip();
+        {
+            let mut counts = per_ip_connections.lock().await;
+            let count = counts.entry(peer_ip).or_insert(0);
+            if *count >= MAX_CONNECTIONS_PER_IP {
+                warn!(
+                    %peer,
+                    limit = MAX_CONNECTIONS_PER_IP,
+                    "Rejecting RPC connection: max connections from this address reached"
+                );
+                continue; // `permit` drops here, releasing the global slot too
+            }
+            *count += 1;
+        }
+
         let shared_mempool = Arc::clone(&mempool);
         let shared_ledger = Arc::clone(&ledger_state);
         let shared_token = Arc::clone(&auth_token);
+        let shared_per_ip = Arc::clone(&per_ip_connections);
         tokio::spawn(async move {
             let _permit = permit; // held for the connection's lifetime; releases on drop
             if let Err(error) =
                 handle_connection(stream, shared_mempool, shared_ledger, shared_token).await
             {
                 warn!(%peer, %error, "RPC connection failed");
+            }
+            let mut counts = shared_per_ip.lock().await;
+            if let Some(count) = counts.get_mut(&peer_ip) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    counts.remove(&peer_ip);
+                }
             }
         });
     }
