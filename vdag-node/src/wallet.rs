@@ -47,6 +47,35 @@ pub fn create(path: &str) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Loads the node's persistent miner keypair from `path`, or generates and
+/// saves a new one if it doesn't exist yet. This is what makes mining
+/// rewards durable across restarts -- previously the node generated a
+/// fresh, never-saved keypair on every single startup, meaning every
+/// restart (including an automatic systemd `Restart=on-failure`) silently
+/// made all previously-earned rewards permanently unspendable, since
+/// nobody held the private key for the old address anymore once the
+/// process exited. Reuses the exact same Argon2 + ChaCha20-Poly1305
+/// encryption already used by `create`, above.
+pub fn load_or_create(path: &str) -> Result<VeloKeyPair, Box<dyn std::error::Error>> {
+    if Path::new(path).exists() {
+        return load(path);
+    }
+
+    let keys = VeloKeyPair::generate();
+    let payload = WalletPayload {
+        public_key: hex::encode(keys.public_key_bytes()),
+        secret_key: hex::encode(keys.secret_key_bytes()),
+    };
+    let wallet = encrypt(&payload, &password()?)?;
+    std::fs::write(path, serde_json::to_vec_pretty(&wallet)?)?;
+    set_private_permissions(path)?;
+    println!(
+        "🔑 Generated new persistent miner wallet path={path} address=0x{}",
+        hex::encode(VeloKeyPair::derive_address(&keys.public_key))
+    );
+    Ok(keys)
+}
+
 pub fn address(path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let keys = load(path)?;
     println!(
